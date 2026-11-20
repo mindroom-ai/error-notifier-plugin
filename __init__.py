@@ -1,0 +1,1 @@
+"""MindRoom error notifier plugin."""
