@@ -1,114 +1,94 @@
-# MindRoom Error Notifier
+# Error Notifier
 
-The error-notifier plugin watches redacted MindRoom error logs and sends concise operational alerts to one existing Matrix room.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-plugins-blue)](https://docs.mindroom.chat/plugins/)
+[![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
 
-Install it by cloning this repository into your MindRoom plugins directory, for example `plugins/error-notifier`, and listing it under `plugins:` as below.
+<picture>
+  <source media="(prefers-reduced-motion: no-preference)" srcset="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark-animated.svg" />
+  <img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark.svg" alt="MindRoom Logo" align="right" width="120" />
+</picture>
 
-It does not create rooms.
-
-It does not create Matrix clients.
-
-It does not retry failed MindRoom operations.
-
-It only sends through the router hook context with `ctx.send_message`.
-
-It watches errors with a stdlib `logging.Handler` at ERROR on the root logger, where MindRoom routes every structlog and stdlib record, and redacts each record with `mindroom.redaction` before it leaves the handler.
-
-Importing the plugin installs the handler, replacing one an earlier import left.
-
-Alerts start once the router's `bot:ready` hook runs, which happens at MindRoom start; errors before that are buffered (at most 1000).
-
-## Configuration
-
-Add the plugin through `config:` or `settings:`.
-
-```yaml
-plugins:
-  - path: plugins/error-notifier
-    config:
-      ops_room: ops
-      rate_limit_seconds: 300
-      include_stack_traces: false
-      extra_loggers: []
-      extra_events: []
-      ignore_loggers: []
-```
-
-`ops_room` defaults to `ops`.
-
-Plain room names are resolved as aliases on the router homeserver.
-
-Full room IDs such as `!abc:server` are used directly.
-
-Room aliases such as `#ops:server` are resolved through the existing Matrix admin binding.
-
-If the room cannot be resolved, the plugin logs one stdlib warning and drops notifications until the config changes.
-
-`rate_limit_seconds` defaults to `300`.
-
-The first `(logger, event)` pair emits immediately.
-
-Further matching occurrences inside the rate-limit window are suppressed.
-
-When the window expires, the worker emits one suppression summary.
-
-If a new occurrence arrives after a quiet suppressed window, the worker emits the suppression summary and then the fresh alert.
-
-`include_stack_traces` defaults to `false`.
-
-When enabled, tracebacks are attached as one collapsed `text/markdown` message extra.
-
-Tracebacks are never inlined into the main alert body.
-
-`extra_loggers` extends the default logger prefixes.
-
-`extra_events` extends the default structured event names.
-
-Set `MINDROOM_ERROR_NOTIFIER_DISABLED=1` to disable the log handler and hooks.
-
-## Default Matching
-
-The plugin only matches records with `level: error`.
-
-It matches every logger under `mindroom` and `livekit` (calls).
-
-It ignores `mindroom.event_loop_stall` (slowness reported at error level) and its own `mindroom.plugins.error_notifier` loggers.
-
-Agno's loggers are left out: their errors are a model's bad tool arguments and failed web fetches, worded per call.
-
-`ignore_loggers` adds logger prefixes to ignore; `extra_loggers` and `extra_events` add matches outside `mindroom` and `livekit`.
-
-A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` is one rate-limited error whatever its arguments; the formatted text appears on the `error:` line.
-
-## Alert Shape
-
-Alerts use this body shape.
+A [MindRoom](https://github.com/mindroom-ai/mindroom) hook plugin that posts a short alert to one Matrix room whenever MindRoom logs an error, with a suggested fix when it knows one.
 
 ```text
 🚨 MindRoom error — 2026-05-20T21:29:40.123456+00:00
 logger: mindroom.orchestrator
 event:  Configuration update failed; will retry if a new change is queued
 error:  Provisioning credentials are invalid or revoked.
-        Run `mindroom connect --pair-code ...` again.
 action: Run `mindroom connect --pair-code <code>` from a paired session.
 ```
 
-Suppression summaries use this body shape.
+- **One alert per kind of error:** repeats inside the rate-limit window are counted and reported once, as `🔕 MindRoom error — suppressed 9 further occurrences of: …`.
+- **Redacted:** every record goes through MindRoom's redactor before it leaves the log handler.
+- **No setup in Matrix:** it sends through the router into a room that already exists, and creates no rooms or clients.
 
-```text
-🔕 MindRoom error — suppressed 9 further occurrences of:
-logger: mindroom.orchestrator
-event:  Configuration update failed; will retry if a new change is queued
+## Quick start
+
+```bash
+mindroom plugins install error-notifier-plugin
 ```
 
-## Live Test
+```yaml
+plugins:
+  - path: plugins/error-notifier-plugin
+    settings:
+      ops_room: ops  # a room name, #alias:server or !id:server
+```
 
-For burst testing, temporarily install the throwaway `error-notifier-test` plugin.
+Update later with `mindroom plugins update error-notifier-plugin`.
 
-Configure `rate_limit_seconds: 5` during the live test.
+## Settings
 
-Send `!fire-errors 10` to produce one immediate alert and one suppression summary.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ops_room` | `ops` | Where alerts go: a plain name (an alias on the router's homeserver), `#alias:server`, or `!id:server`. |
+| `rate_limit_seconds` | `300` | Window in which repeats of the same logger and event are suppressed. |
+| `include_stack_traces` | `false` | Attach the traceback as a collapsed section of the alert. |
+| `ignore_loggers` | none | Extra logger prefixes to ignore. |
+| `extra_loggers` | none | Extra logger prefixes to watch, beyond `mindroom` and `livekit`. |
+| `extra_events` | none | Extra structured event names to watch, from any logger. |
 
-Send `!simulate-provisioning-failure` to verify the provisioning remediation action.
+Set `MINDROOM_ERROR_NOTIFIER_DISABLED=1` to turn it off without editing the config.
 
-Delete `~/.mindroom-chat/plugins/error-notifier-test/` after the live test.
+<details>
+<summary><b>What counts as an error</b></summary>
+
+- Only records at `error` level.
+- Every logger under `mindroom`, and `livekit` for calls.
+- Not `mindroom.event_loop_stall`, which reports slowness at error level, and not the plugin's own logger.
+- Not Agno's loggers: their errors are a model's bad tool arguments and failed web fetches, which the agent already sees.
+
+A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` is one error whatever its arguments; the formatted text appears on the `error:` line.
+
+</details>
+
+<details>
+<summary><b>How it works</b></summary>
+
+1. Importing the plugin installs a `logging.Handler` at `ERROR` on the root logger, where MindRoom routes both structlog and stdlib records. A reload replaces the earlier handler.
+2. Each matching record is redacted and queued. Records logged before the router is ready are buffered, at most 1000.
+3. On the router's `bot:ready`, a worker starts and sends the buffer, then each new record.
+4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
+5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
+6. On `config:reloaded`, changed settings apply to the running worker.
+
+If the room cannot be resolved, the plugin logs one warning and drops alerts until the config changes. Tracebacks are never inlined in the alert body.
+
+</details>
+
+<details>
+<summary><b>Limits</b></summary>
+
+- It sees only errors MindRoom logs; a crash that kills the process before logging sends nothing.
+- Alerts go to a room the router can post in; if the router itself is down, nothing is sent.
+- `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (hooks, redaction, message extras); re-run it after each upgrade.
+
+</details>
+
+## Hooks
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `error-notifier-ready` | `bot:ready` (router) | Start the alert worker and send buffered errors |
+| `error-notifier-config-reloaded` | `config:reloaded` (router) | Apply changed settings to the running worker |
