@@ -8,11 +8,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from mindroom.constants import RuntimePaths
-from mindroom.logging_config import get_logger, setup_logging
-
 from error_notifier_test_import.log_handler import HANDLER_NAME, install_error_log_handler
 from error_notifier_test_import.models import ObservedError
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
 
 
 def _remove_installed_handlers() -> None:

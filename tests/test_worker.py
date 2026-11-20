@@ -7,12 +7,10 @@ import asyncio
 import threading
 
 import pytest
-
-from error_notifier_test_import.models import NotifierSettings, ObservedError
-from error_notifier_test_import import worker as worker_module
-from error_notifier_test_import.worker import ErrorNotifierWorker, WorkerDeps, resolve_ops_room
-
 from conftest import FakeHookContext, FakeMatrixAdmin
+from error_notifier_test_import import worker as worker_module
+from error_notifier_test_import.models import NotifierSettings, ObservedError
+from error_notifier_test_import.worker import ErrorNotifierWorker, WorkerDeps, resolve_ops_room
 
 
 class Clock:
@@ -265,7 +263,8 @@ async def test_wait_closed_without_task_is_noop() -> None:
 async def test_resolve_ops_room_failure_modes_and_aliases() -> None:
     assert await resolve_ops_room(_ctx(), NotifierSettings(ops_room="")) is None
     assert await resolve_ops_room(FakeHookContext(matrix_admin=None), NotifierSettings()) is None
-    assert await resolve_ops_room(FakeHookContext(matrix_admin=FakeMatrixAdmin(), matrix_user_id="@bad"), NotifierSettings()) is None
+    bad_user = FakeHookContext(matrix_admin=FakeMatrixAdmin(), matrix_user_id="@bad")
+    assert await resolve_ops_room(bad_user, NotifierSettings()) is None
 
     admin = FakeMatrixAdmin({"#ops:localhost": "!ops"})
     resolved = await resolve_ops_room(FakeHookContext(matrix_admin=admin), NotifierSettings(ops_room="#ops:localhost"))

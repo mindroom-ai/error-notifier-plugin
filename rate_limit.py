@@ -5,10 +5,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class DecisionKind(str, Enum):
+class DecisionKind(StrEnum):
     """Rate-limit decision kinds."""
 
     EMIT_FRESH = "emit_fresh"

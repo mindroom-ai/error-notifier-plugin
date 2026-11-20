@@ -8,9 +8,8 @@ import os
 from collections import deque
 
 import structlog
-
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.hooks import AgentLifecycleContext, ConfigReloadedContext, EVENT_BOT_READY, EVENT_CONFIG_RELOADED, hook
+from mindroom.hooks import EVENT_BOT_READY, EVENT_CONFIG_RELOADED, AgentLifecycleContext, ConfigReloadedContext, hook
 
 from .log_handler import install_error_log_handler
 from .models import ObservedError

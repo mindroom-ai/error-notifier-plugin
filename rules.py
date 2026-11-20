@@ -22,7 +22,8 @@ ACTIONS_BY_EVENT = {
         "Check the named agent's model, Matrix account, tools, and room configuration, then trigger a config reload."
     ),
     "agent_start_failed_permanently": (
-        "Permanent agent startup failure - credentials, model, or Matrix account are invalid; fix configuration and restart."
+        "Permanent agent startup failure - credentials, model, or Matrix account are invalid; "
+        "fix configuration and restart."
     ),
     "config_update_failed": (
         "Inspect the latest config diff in ~/.mindroom-chat/config.yaml; previous valid config is still active."
@@ -32,7 +33,8 @@ ACTIONS_BY_EVENT = {
         "Check the knowledge-base path and file contents, then touch the file or reload the knowledge base."
     ),
     "plugin_activation_failed": (
-        "Inspect the plugin manifest at the indicated path; disable the failing plugin or re-run with --log-level DEBUG to see import errors."
+        "Inspect the plugin manifest at the indicated path; disable the failing plugin "
+        "or re-run with --log-level DEBUG to see import errors."
     ),
     "fatal_orchestrator_exit": (
         "MindRoom orchestrator exited. Inspect the recent logs in mindroom_data/logs/ and restart the service."
@@ -51,7 +53,8 @@ ACTIONS_BY_ERROR_SUBSTRING = (
     ),
     (
         "Provisioning credentials are incomplete",
-        "Check `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, or run `mindroom connect --pair-code <code>` again.",
+        "Check `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, "
+        "or run `mindroom connect --pair-code <code>` again.",
     ),
     (
         "Plugin module execution failed",
@@ -91,7 +94,9 @@ def matches(record: ObservedError, settings: NotifierSettings) -> bool:
         return False
 
     loggers = (*DEFAULT_LOGGERS, *settings.extra_loggers)
-    return any(_logger_matches(record.logger, logger_name) for logger_name in loggers) or record.event in settings.extra_events
+    if record.event in settings.extra_events:
+        return True
+    return any(_logger_matches(record.logger, logger_name) for logger_name in loggers)
 
 
 def action_for(record: ObservedError) -> str | None:

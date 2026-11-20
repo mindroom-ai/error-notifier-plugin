@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
-
 from error_notifier_test_import.formatter import extra_content_for, format_alert, format_suppression_summary
 from error_notifier_test_import.models import ObservedError
+from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 
 
 def _record(**overrides: object) -> ObservedError:

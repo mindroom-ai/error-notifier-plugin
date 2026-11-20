@@ -40,7 +40,8 @@ def test_other_libraries_do_not_match() -> None:
 
 
 def test_event_loop_stalls_are_ignored() -> None:
-    assert not matches(_record(logger="mindroom.event_loop_stall", event="event_loop_stall_detected"), NotifierSettings())
+    record = _record(logger="mindroom.event_loop_stall", event="event_loop_stall_detected")
+    assert not matches(record, NotifierSettings())
 
 
 def test_ignore_loggers_extend_the_ignored_set() -> None:

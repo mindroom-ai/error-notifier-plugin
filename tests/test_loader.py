@@ -8,12 +8,10 @@ import importlib
 import logging
 
 import pytest
-
+from conftest import FakeHookContext
 from error_notifier_test_import import hooks
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
-
-from conftest import FakeHookContext
 
 
 def _remove_installed_handlers() -> None:

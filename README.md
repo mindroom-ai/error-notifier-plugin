@@ -37,6 +37,7 @@ plugins:
 ```
 
 Update later with `mindroom plugins update error-notifier-plugin`.
+Needs MindRoom v2026.11.468 or later (plugin API 1.32).
 
 ## Settings
 
