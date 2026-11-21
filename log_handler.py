@@ -6,7 +6,6 @@ handler on the root logger sees every error without any MindRoom-side observer A
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 import traceback
@@ -27,19 +26,12 @@ _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 
 
 class ErrorLogHandler(logging.Handler):
-    """Pass each ERROR record to a callback as a redacted `ObservedError`; never raise into the caller.
-
-    The handler also keeps what the plugin learned at `bot:ready` (the service hook context, the plugin settings,
-    and the event loop), because a plugin hot reload imports fresh modules without firing `bot:ready` again.
-    """
+    """Pass each ERROR record to a callback as a redacted `ObservedError`; never raise into the caller."""
 
     def __init__(self, callback: Callable[[ObservedError], None]) -> None:
         super().__init__(level=logging.ERROR)
         self.set_name(HANDLER_NAME)
         self._callback = callback
-        self.context: Any = None
-        self.raw_settings: dict[str, Any] = {}
-        self.loop: asyncio.AbstractEventLoop | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
         """Convert and hand over one record."""
@@ -57,10 +49,6 @@ def install_error_log_handler(callback: Callable[[ObservedError], None]) -> Erro
     handler = ErrorLogHandler(callback)
     for previous in list(root.handlers):
         if previous.get_name() == HANDLER_NAME:
-            if isinstance(getattr(previous, "raw_settings", None), dict):
-                handler.context = getattr(previous, "context", None)
-                handler.raw_settings = previous.raw_settings
-                handler.loop = getattr(previous, "loop", None)
             root.removeHandler(previous)
     root.addHandler(handler)
     return handler

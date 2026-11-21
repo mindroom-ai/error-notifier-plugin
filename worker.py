@@ -81,12 +81,10 @@ class ErrorNotifierWorker:
 
     def start(self) -> None:
         """Start the worker task once."""
-        global _worker_task
         if self._task is not None and not self._task.done():
             return
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run(), name="error-notifier-worker")
-        _worker_task = self._task
 
     def update_settings(self, settings: NotifierSettings) -> None:
         """Apply updated settings without replacing the queue."""
@@ -212,47 +210,6 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return asyncio.get_running_loop()
     except RuntimeError:
         return None
-
-
-_worker: ErrorNotifierWorker | None = None
-_worker_task: asyncio.Task[None] | None = None
-
-
-def start_worker(
-    ctx: _SendContext,
-    settings: NotifierSettings,
-    *,
-    deps: WorkerDeps | None = None,
-) -> ErrorNotifierWorker:
-    """Start or reconfigure the module-global worker."""
-    global _worker
-    if _worker is None:
-        _worker = ErrorNotifierWorker(ctx, settings, deps=deps)
-    else:
-        _worker.update_settings(settings)
-    _worker.start()
-    return _worker
-
-
-def enqueue_record(record: ObservedError) -> bool:
-    """Queue one record on the running worker."""
-    if _worker is None:
-        return False
-    return _worker.submit(record)
-
-
-def current_worker() -> ErrorNotifierWorker | None:
-    """Return the module-global worker for tests."""
-    return _worker
-
-
-def cancel_worker() -> None:
-    """Cancel the module-global worker and forget it."""
-    global _worker, _worker_task
-    if _worker is not None:
-        _worker.cancel()
-    _worker = None
-    _worker_task = None
 
 
 async def resolve_ops_room(ctx: _SendContext, settings: NotifierSettings) -> ResolvedOpsRoom | None:

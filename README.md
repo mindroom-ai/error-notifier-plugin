@@ -67,13 +67,15 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 <details>
 <summary><b>How it works</b></summary>
 
-1. Importing the plugin installs a `logging.Handler` at `ERROR` on the root logger, where MindRoom routes both structlog and stdlib records. A reload replaces the earlier handler.
-2. Each matching record is redacted and queued. Records logged before MindRoom is ready are buffered, at most 1000.
+1. When MindRoom activates the plugin, its lifespan installs a root `logging.Handler` for `ERROR` records from structlog and stdlib.
+2. Each matching record is redacted and queued. Up to 1000 records between activation and `bot:ready` are buffered.
 3. On the service-scoped `bot:ready`, a worker starts and sends the buffer, then each new record.
 4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
 5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
 
-Restart MindRoom to apply changed plugin settings.
+Reloads that keep the plugin enabled preserve the running worker and its alert queue. Disabling or removing the plugin, or shutting down MindRoom, detaches the handler and stops the worker.
+
+Restart MindRoom to apply changed settings, enable the notifier after startup, or upgrade from a notifier without lifespan support.
 
 If the room cannot be resolved, the plugin logs one warning and drops alerts until MindRoom restarts. Tracebacks are never inlined in the alert body.
 

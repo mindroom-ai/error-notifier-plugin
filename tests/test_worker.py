@@ -8,7 +8,6 @@ import threading
 
 import pytest
 from conftest import FakeHookContext, FakeMatrixAdmin
-from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.models import NotifierSettings, ObservedError
 from error_notifier_test_import.worker import ErrorNotifierWorker, WorkerDeps, resolve_ops_room
 
@@ -271,20 +270,3 @@ async def test_resolve_ops_room_failure_modes_and_aliases() -> None:
 
     assert resolved is not None
     assert resolved.room_id == "!ops"
-
-
-@pytest.mark.asyncio
-async def test_global_worker_lifecycle_functions() -> None:
-    worker_module.cancel_worker()
-    assert not worker_module.enqueue_record(_record())
-    assert worker_module.current_worker() is None
-
-    ctx = _ctx()
-    worker = worker_module.start_worker(ctx, NotifierSettings(extra_events=("test_burst_error",)))
-    same_worker = worker_module.start_worker(ctx, NotifierSettings(rate_limit_seconds=5))
-
-    assert same_worker is worker
-    assert worker_module.current_worker() is worker
-    worker_module.cancel_worker()
-    assert worker_module.current_worker() is None
-    await worker.wait_closed()
