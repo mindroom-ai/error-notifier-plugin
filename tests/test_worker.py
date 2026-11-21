@@ -285,7 +285,6 @@ async def test_global_worker_lifecycle_functions() -> None:
 
     assert same_worker is worker
     assert worker_module.current_worker() is worker
-    worker_module.reconfigure_worker(NotifierSettings(ops_room="dev"))
     worker_module.cancel_worker()
     assert worker_module.current_worker() is None
     await worker.wait_closed()

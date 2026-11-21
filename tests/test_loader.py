@@ -12,6 +12,8 @@ from conftest import FakeHookContext
 from error_notifier_test_import import hooks
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
+from mindroom.hooks import EVENT_BOT_READY
+from mindroom.hooks.decorators import get_hook_metadata, iter_module_hooks
 
 
 def _remove_installed_handlers() -> None:
@@ -32,6 +34,17 @@ def test_importing_hooks_buffers_errors_until_the_worker_starts() -> None:
         assert sum(handler.get_name() == HANDLER_NAME for handler in logging.getLogger().handlers) == 1
     finally:
         _remove_installed_handlers()
+
+
+def test_ready_is_the_only_hook_and_is_explicitly_service_scoped() -> None:
+    [callback] = iter_module_hooks(hooks)
+    metadata = get_hook_metadata(callback)
+
+    assert metadata is not None
+    assert metadata.event_name == EVENT_BOT_READY
+    assert metadata.hook_name == "error-notifier-ready"
+    assert metadata.scope == "service"
+    assert metadata.agents is None
 
 
 @pytest.mark.asyncio
