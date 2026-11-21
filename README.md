@@ -75,7 +75,7 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 
 Restart MindRoom to apply changed plugin settings.
 
-If the room cannot be resolved, the plugin logs one warning and drops alerts until MindRoom restarts. Tracebacks are never inlined in the alert body.
+If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert; it does not apply changed settings. Tracebacks are never inlined in the alert body.
 
 </details>
 
