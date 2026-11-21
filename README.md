@@ -72,9 +72,10 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 3. On the service-scoped `bot:ready`, a worker starts and sends the buffer, then each new record.
 4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
 5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
-6. On `config:reloaded`, changed settings apply to the running worker.
 
-If the room cannot be resolved, the plugin logs one warning and drops alerts until the config changes. Tracebacks are never inlined in the alert body.
+Restart MindRoom to apply changed plugin settings.
+
+If the room cannot be resolved, the plugin logs one warning and drops alerts until MindRoom restarts. Tracebacks are never inlined in the alert body.
 
 </details>
 
@@ -92,4 +93,3 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts unt
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `error-notifier-ready` | `bot:ready` (service) | Start the alert worker and send buffered errors |
-| `error-notifier-config-reloaded` | `config:reloaded` (service) | Apply changed settings to the running worker |

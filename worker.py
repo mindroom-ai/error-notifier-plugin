@@ -234,12 +234,6 @@ def start_worker(
     return _worker
 
 
-def reconfigure_worker(settings: NotifierSettings) -> None:
-    """Update settings on the running worker when present."""
-    if _worker is not None:
-        _worker.update_settings(settings)
-
-
 def enqueue_record(record: ObservedError) -> bool:
     """Queue one record on the running worker."""
     if _worker is None:

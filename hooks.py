@@ -8,12 +8,12 @@ import os
 from collections import deque
 
 import structlog
-from mindroom.hooks import EVENT_BOT_READY, EVENT_CONFIG_RELOADED, AgentLifecycleContext, ConfigReloadedContext, hook
+from mindroom.hooks import EVENT_BOT_READY, AgentLifecycleContext, hook
 
 from .log_handler import install_error_log_handler
 from .models import ObservedError
 from .rules import settings_from_mapping
-from .worker import ErrorNotifierWorker, enqueue_record, reconfigure_worker, start_worker
+from .worker import ErrorNotifierWorker, enqueue_record, start_worker
 
 PLUGIN_NAME = "error-notifier"
 _DISABLED = os.getenv("MINDROOM_ERROR_NOTIFIER_DISABLED") == "1"
@@ -55,12 +55,3 @@ async def handle_bot_ready(ctx: AgentLifecycleContext) -> None:
         return
     _handler.context, _handler.raw_settings, _handler.loop = ctx, dict(ctx.settings), asyncio.get_running_loop()
     _start(ctx, _handler.raw_settings)
-
-
-@hook(EVENT_CONFIG_RELOADED, name="error-notifier-config-reloaded", scope="service", timeout_ms=3000)
-async def handle_config_reloaded(ctx: ConfigReloadedContext) -> None:
-    """Apply changed plugin settings to the running worker."""
-    if _handler is None:
-        return
-    _handler.raw_settings = dict(ctx.settings)
-    reconfigure_worker(settings_from_mapping(ctx.settings))
