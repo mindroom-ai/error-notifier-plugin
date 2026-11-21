@@ -9,12 +9,12 @@ import os
 import threading
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 from mindroom.hooks import EVENT_BOT_READY, AgentLifecycleContext, hook
 
-from .log_handler import install_error_log_handler
+from .log_handler import HANDLER_NAME, install_error_log_handler
 from .models import ObservedError
 from .rules import settings_from_mapping
 from .worker import ErrorNotifierWorker
@@ -28,8 +28,7 @@ _logger = structlog.get_logger("mindroom.plugins.error_notifier")
 
 
 class _NotifierRuntime:
-    def __init__(self, process_state: dict[str, Any]) -> None:
-        self._process_state = process_state
+    def __init__(self) -> None:
         self._buffer: deque[ObservedError] = deque(maxlen=1000)
         self._worker: ErrorNotifierWorker | None = None
         self._active = True
@@ -52,12 +51,16 @@ class _NotifierRuntime:
         else:
             self._worker.submit(record)
 
-    def ready(self, ctx: AgentLifecycleContext) -> None:
-        if not self._active or self._worker is not None:
+    def ready(self, ctx: AgentLifecycleContext | None) -> None:
+        if not self._active:
+            return
+        if self._worker is not None:
+            self._worker.start()  # Preserve the queue and settings even if the consumer exited.
+            return
+        if ctx is None:
             return
         worker = self._worker = ErrorNotifierWorker(ctx, settings_from_mapping(ctx.settings))
         worker.start()
-        self._process_state["worker_task"] = worker.task
         buffered = len(self._buffer)
         while self._buffer:
             worker.submit(self._buffer.popleft())
@@ -69,19 +72,19 @@ class _NotifierRuntime:
         self._handler.close()
         self._buffer.clear()
         worker, self._worker = self._worker, None
-        self._process_state.pop("worker_task", None)
         if worker is not None:
             worker.cancel()
             await worker.wait_closed()
 
 
 _runtime: _NotifierRuntime | None = None
+_pending_ready: AgentLifecycleContext | None = None
 
 
 @asynccontextmanager
 async def lifespan(lifecycle: PluginLifecycle) -> AsyncIterator[None]:
     """Keep the same handler, settings, and queue until disable or shutdown."""
-    global _runtime
+    global _runtime, _pending_ready
     state = lifecycle.process_state
     if os.getenv("MINDROOM_ERROR_NOTIFIER_DISABLED") == "1":
         if (previous := state.pop("runtime", None)) is not None:
@@ -90,10 +93,18 @@ async def lifespan(lifecycle: PluginLifecycle) -> AsyncIterator[None]:
         return
 
     runtime = state.get("runtime")
+    ctx, _pending_ready = _pending_ready, None
     if runtime is None:
-        runtime = state["runtime"] = _NotifierRuntime(state)
+        # Upgrading a pre-lifespan notifier after startup does not emit bot:ready again.
+        if ctx is None:
+            ctx = next(
+                (getattr(h, "context", None) for h in logging.getLogger().handlers if h.get_name() == HANDLER_NAME),
+                None,
+            )
+        runtime = state["runtime"] = _NotifierRuntime()
     _runtime = runtime
     try:
+        runtime.ready(ctx)
         yield
     finally:
         if lifecycle.stop_reason != "reload":
@@ -104,5 +115,8 @@ async def lifespan(lifecycle: PluginLifecycle) -> AsyncIterator[None]:
 @hook(EVENT_BOT_READY, name="error-notifier-ready", scope="service", priority=50, timeout_ms=30000)
 async def handle_bot_ready(ctx: AgentLifecycleContext) -> None:
     """Start the notifier worker after MindRoom is ready."""
-    if _runtime is not None:
+    global _pending_ready
+    if _runtime is None:
+        _pending_ready = ctx  # Publication can expose this hook before its lifespan starts.
+    else:
         _runtime.ready(ctx)

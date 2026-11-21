@@ -75,9 +75,9 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 
 Reloads that keep the plugin enabled preserve the running worker and its alert queue. Disabling or removing the plugin, or shutting down MindRoom, detaches the handler and stops the worker.
 
-Restart MindRoom to apply changed settings, enable the notifier after startup, or upgrade from a notifier without lifespan support.
+Restart MindRoom to apply changed settings or notifier code updates, or to enable the notifier for the first time after startup. An in-place upgrade from a notifier without lifespan support can keep sending using its existing startup context.
 
-If the room cannot be resolved, the plugin logs one warning and drops alerts until MindRoom restarts. Tracebacks are never inlined in the alert body.
+If an alias lookup returns no room, the plugin logs one warning and drops alerts until MindRoom restarts. If the lookup raises a transport error, the plugin retries once before dropping that alert, and can try again on the next alert. Tracebacks are never inlined in the alert body.
 
 </details>
 

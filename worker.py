@@ -80,9 +80,12 @@ class ErrorNotifierWorker:
         return self._queue
 
     def start(self) -> None:
-        """Start the worker task once."""
-        if self._task is not None and not self._task.done():
-            return
+        """Start the consumer if it is not running, including after a failed task."""
+        if self._task is not None:
+            if not self._task.done():
+                return
+            if not self._task.cancelled() and (error := self._task.exception()) is not None:
+                _WARNING_LOGGER.warning("error-notifier restarting a failed worker", exc_info=error)
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run(), name="error-notifier-worker")
 
@@ -194,8 +197,16 @@ class ErrorNotifierWorker:
         if self._resolution_attempted:
             return None
 
+        for attempt in range(2):
+            try:
+                resolved = await resolve_ops_room(self._ctx, self._settings)
+                break
+            except Exception:
+                _WARNING_LOGGER.warning("error-notifier alias lookup failed", exc_info=True)
+                if attempt:
+                    return None
+                await self._deps.sleep(0.25)
         self._resolution_attempted = True
-        resolved = await resolve_ops_room(self._ctx, self._settings)
         if resolved is None:
             if not self._resolution_warning_emitted:
                 _WARNING_LOGGER.warning("error-notifier ops room could not be resolved: %s", self._settings.ops_room)

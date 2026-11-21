@@ -47,14 +47,17 @@ class _PublishedRuntime:
         self.config = Config()
         self.lifespans = PluginLifespans(self.paths, lambda: self.config)
 
-    async def publish(self, *, ops_room: str | None = "!startup:localhost", enabled: bool = True) -> None:
+    async def publish(
+        self, *, ops_room: str | None = "!startup:localhost", enabled: bool = True, apply: bool = True
+    ) -> None:
         entries = []
         if ops_room is not None:
             entries.append({"path": str(PLUGIN_ROOT), "enabled": enabled, "settings": {"ops_room": ops_room}})
         self.config = Config.model_validate({"plugins": entries})
         result = publish_plugins(prepare_plugins(self.config, self.paths))
         assert not result.skipped
-        await self.lifespans.apply_published()
+        if apply:
+            await self.lifespans.apply_published()
 
     async def ready(self, ctx: FakeHookContext) -> None:
         [ready] = config_plugins(self.config, self.paths).hooks.hooks_for(EVENT_BOT_READY)
@@ -146,6 +149,98 @@ async def test_published_settings_change_preserves_pending_alerts(
     assert sent == [(event, "!startup:localhost") for event in ("in_flight", "queued_one", "queued_two", "after_swap")]
 
 
+def _alert_destination(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> tuple[FakeHookContext, asyncio.Queue[str]]:
+    messages: asyncio.Queue[str] = asyncio.Queue()
+
+    async def send_message(*, text: str, **_kwargs: object) -> str:
+        messages.put_nowait(text)
+        return "$alert"
+
+    ctx = FakeHookContext(**kwargs)
+    monkeypatch.setattr(ctx, "send_message", send_message)
+    return ctx, messages
+
+
+@pytest.mark.asyncio
+async def test_first_lifespan_adopts_legacy_ready_context(
+    runtime: _PublishedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx, messages = _alert_destination(monkeypatch, settings={"ops_room": "!startup:localhost"})
+    # The pre-lifespan handler keeps the ready context on the root logger across publication.
+    legacy_handler = logging.NullHandler()
+    legacy_handler.set_name(HANDLER_NAME)
+    legacy_handler.context = ctx
+    logging.getLogger().addHandler(legacy_handler)
+
+    await runtime.publish()
+    logging.getLogger("mindroom.orchestrator").error("after_legacy_upgrade")
+
+    assert "after_legacy_upgrade" in await asyncio.wait_for(messages.get(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_ready_before_replacement_lifespan_still_starts_the_worker(
+    runtime: _PublishedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await runtime.publish()
+    await runtime.publish(apply=False)
+    ctx, messages = _alert_destination(monkeypatch, settings={"ops_room": "!startup:localhost"})
+    await runtime.ready(ctx)
+    await runtime.lifespans.apply_published()
+    logging.getLogger("mindroom.orchestrator").error("after_early_ready")
+
+    assert "after_early_ready" in await asyncio.wait_for(messages.get(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_alias_transport_failure_recovers_and_delivers_the_pending_alert(
+    runtime: _PublishedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_lookup = asyncio.Event()
+
+    class Resolver:
+        async def resolve_alias(self, alias: str) -> str:
+            assert alias == "#ops:localhost"
+            if not first_lookup.is_set():
+                first_lookup.set()
+                raise TimeoutError("transient alias lookup failure")
+            return "!resolved:localhost"
+
+    await runtime.publish(ops_room="ops")
+    ctx, messages = _alert_destination(monkeypatch, settings={"ops_room": "ops"}, matrix_admin=Resolver())
+    await runtime.ready(ctx)
+    logger = logging.getLogger("mindroom.orchestrator")
+    logger.error("before_alias_recovery")
+    await asyncio.wait_for(first_lookup.wait(), timeout=1)
+    await runtime.publish(ops_room="ops")
+    logger.error("after_alias_recovery")
+
+    assert "before_alias_recovery" in await asyncio.wait_for(messages.get(), timeout=2)
+    assert "after_alias_recovery" in await asyncio.wait_for(messages.get(), timeout=2)
+    assert messages.empty()
+
+
+@pytest.mark.asyncio
+async def test_new_generation_restarts_a_stopped_worker_with_its_queue(
+    runtime: _PublishedRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await runtime.publish()
+    ctx, messages = _alert_destination(monkeypatch, settings={"ops_room": "!startup:localhost"})
+    await runtime.ready(ctx)
+    [worker] = [task for task in asyncio.all_tasks() if task.get_name() == "error-notifier-worker"]
+    worker.cancel()
+    with suppress(asyncio.CancelledError):
+        await worker
+    logging.getLogger("mindroom.orchestrator").error("while_worker_stopped")
+    await runtime.publish()
+
+    assert "while_worker_stopped" in await asyncio.wait_for(messages.get(), timeout=1)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["disable", "remove", "shutdown"])
 async def test_notifier_stops_posting_and_detaches_its_handler(
@@ -170,10 +265,11 @@ async def test_notifier_stops_posting_and_detaches_its_handler(
     # The old handler on this generation can resurrect a worker after publication cancels the first one.
     await runtime.publish(ops_room="!edited:localhost")
 
-    if stop == "shutdown":
-        await runtime.lifespans.stop()
-    else:
-        await runtime.publish(ops_room="!edited:localhost" if stop == "disable" else None, enabled=False)
+    async with asyncio.timeout(2):  # Must finish before the host's 10-second forced cancellation.
+        if stop == "shutdown":
+            await runtime.lifespans.stop()
+        else:
+            await runtime.publish(ops_room="!edited:localhost" if stop == "disable" else None, enabled=False)
     logger.error("after_stop")
     with suppress(TimeoutError):
         await asyncio.wait_for(posted.wait(), timeout=0.1)
