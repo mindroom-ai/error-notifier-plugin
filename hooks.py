@@ -8,7 +8,6 @@ import os
 from collections import deque
 
 import structlog
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_BOT_READY, EVENT_CONFIG_RELOADED, AgentLifecycleContext, ConfigReloadedContext, hook
 
 from .log_handler import install_error_log_handler
@@ -49,16 +48,16 @@ def _resume_worker() -> None:
 _handler = None if _DISABLED else install_error_log_handler(_observer)
 
 
-@hook(EVENT_BOT_READY, name="error-notifier-ready", agents=(ROUTER_AGENT_NAME,), priority=50, timeout_ms=30000)
+@hook(EVENT_BOT_READY, name="error-notifier-ready", scope="service", priority=50, timeout_ms=30000)
 async def handle_bot_ready(ctx: AgentLifecycleContext) -> None:
-    """Start the notifier worker after the router bot is ready."""
+    """Start the notifier worker after MindRoom is ready."""
     if _handler is None:
         return
     _handler.context, _handler.raw_settings, _handler.loop = ctx, dict(ctx.settings), asyncio.get_running_loop()
     _start(ctx, _handler.raw_settings)
 
 
-@hook(EVENT_CONFIG_RELOADED, name="error-notifier-config-reloaded", agents=(ROUTER_AGENT_NAME,), timeout_ms=3000)
+@hook(EVENT_CONFIG_RELOADED, name="error-notifier-config-reloaded", scope="service", timeout_ms=3000)
 async def handle_config_reloaded(ctx: ConfigReloadedContext) -> None:
     """Apply changed plugin settings to the running worker."""
     if _handler is None:

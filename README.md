@@ -21,7 +21,7 @@ action: Run `mindroom connect --pair-code <code>` from a paired session.
 
 - **One alert per kind of error:** repeats inside the rate-limit window are counted and reported once, as `🔕 MindRoom error — suppressed 9 further occurrences of: …`.
 - **Redacted:** every record goes through MindRoom's redactor before it leaves the log handler.
-- **No setup in Matrix:** it sends through the router into a room that already exists, and creates no rooms or clients.
+- **No setup in Matrix:** it sends through MindRoom into a room that already exists, and creates no rooms or clients.
 
 ## Quick start
 
@@ -37,13 +37,13 @@ plugins:
 ```
 
 Update later with `mindroom plugins update error-notifier-plugin`.
-Needs MindRoom v2026.11.468 or later (plugin API 1.32).
+Needs MindRoom v2026.11.491 or later (plugin API 1.33).
 
 ## Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ops_room` | `ops` | Where alerts go: a plain name (an alias on the router's homeserver), `#alias:server`, or `!id:server`. |
+| `ops_room` | `ops` | Where alerts go: a plain name (an alias on MindRoom's homeserver), `#alias:server`, or `!id:server`. |
 | `rate_limit_seconds` | `300` | Window in which repeats of the same logger and event are suppressed. |
 | `include_stack_traces` | `false` | Attach the traceback as a collapsed section of the alert. |
 | `ignore_loggers` | none | Extra logger prefixes to ignore. |
@@ -68,8 +68,8 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 <summary><b>How it works</b></summary>
 
 1. Importing the plugin installs a `logging.Handler` at `ERROR` on the root logger, where MindRoom routes both structlog and stdlib records. A reload replaces the earlier handler.
-2. Each matching record is redacted and queued. Records logged before the router is ready are buffered, at most 1000.
-3. On the router's `bot:ready`, a worker starts and sends the buffer, then each new record.
+2. Each matching record is redacted and queued. Records logged before MindRoom is ready are buffered, at most 1000.
+3. On the service-scoped `bot:ready`, a worker starts and sends the buffer, then each new record.
 4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
 5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
 6. On `config:reloaded`, changed settings apply to the running worker.
@@ -82,7 +82,7 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts unt
 <summary><b>Limits</b></summary>
 
 - It sees only errors MindRoom logs; a crash that kills the process before logging sends nothing.
-- Alerts go to a room the router can post in; if the router itself is down, nothing is sent.
+- Alerts go to a room that a running MindRoom bot can post in.
 - `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (hooks, redaction, message extras); re-run it after each upgrade.
 
 </details>
@@ -91,5 +91,5 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts unt
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `error-notifier-ready` | `bot:ready` (router) | Start the alert worker and send buffered errors |
-| `error-notifier-config-reloaded` | `config:reloaded` (router) | Apply changed settings to the running worker |
+| `error-notifier-ready` | `bot:ready` (service) | Start the alert worker and send buffered errors |
+| `error-notifier-config-reloaded` | `config:reloaded` (service) | Apply changed settings to the running worker |

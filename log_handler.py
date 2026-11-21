@@ -29,7 +29,7 @@ _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 class ErrorLogHandler(logging.Handler):
     """Pass each ERROR record to a callback as a redacted `ObservedError`; never raise into the caller.
 
-    The handler also keeps what the plugin learned at `bot:ready` (the router's hook context, the plugin settings,
+    The handler also keeps what the plugin learned at `bot:ready` (the service hook context, the plugin settings,
     and the event loop), because a plugin hot reload imports fresh modules without firing `bot:ready` again.
     """
 
