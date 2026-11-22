@@ -13,8 +13,8 @@ from error_notifier_test_import import hooks
 from error_notifier_test_import import log_handler as log_handler_module
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
-from mindroom.hooks import EVENT_BOT_READY
 from mindroom.hooks.decorators import get_hook_metadata, iter_module_hooks
+from mindroom.plugin_api import EVENT_BOT_READY
 
 
 def test_importing_hooks_buffers_errors_until_the_worker_starts() -> None:
