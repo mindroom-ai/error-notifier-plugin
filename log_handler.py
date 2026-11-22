@@ -16,7 +16,8 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any
 
-from mindroom.redaction import redact_log_event, redact_sensitive_text
+from mindroom.plugin_api import redact_sensitive_text
+from mindroom.redaction import redact_log_event
 
 from .models import ObservedError
 from .rules import FEEDBACK_LOOP_LOGGER_PREFIX

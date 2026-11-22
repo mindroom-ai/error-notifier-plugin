@@ -8,7 +8,7 @@ import os
 from collections import deque
 
 import structlog
-from mindroom.hooks import EVENT_BOT_READY, AgentLifecycleContext, hook
+from mindroom.plugin_api import EVENT_BOT_READY, AgentLifecycleContext, hook
 
 from .log_handler import install_error_log_handler
 from .models import ObservedError
