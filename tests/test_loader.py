@@ -8,19 +8,13 @@ import importlib
 import logging
 
 import pytest
-from conftest import FakeHookContext
+from conftest import FakeHookContext, remove_installed_handlers
 from error_notifier_test_import import hooks
+from error_notifier_test_import import log_handler as log_handler_module
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
 from mindroom.hooks import EVENT_BOT_READY
 from mindroom.hooks.decorators import get_hook_metadata, iter_module_hooks
-
-
-def _remove_installed_handlers() -> None:
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        if handler.get_name() == HANDLER_NAME:
-            root.removeHandler(handler)
 
 
 def test_importing_hooks_buffers_errors_until_the_worker_starts() -> None:
@@ -33,7 +27,7 @@ def test_importing_hooks_buffers_errors_until_the_worker_starts() -> None:
         assert [record.event for record in module._buffer] == ["config_update_failed"]
         assert sum(handler.get_name() == HANDLER_NAME for handler in logging.getLogger().handlers) == 1
     finally:
-        _remove_installed_handlers()
+        remove_installed_handlers()
 
 
 def test_ready_is_the_only_hook_and_is_explicitly_service_scoped() -> None:
@@ -48,32 +42,72 @@ def test_ready_is_the_only_hook_and_is_explicitly_service_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_alerts_continue_after_a_plugin_hot_reload() -> None:
+async def test_alerts_and_in_send_suppression_survive_a_plugin_hot_reload() -> None:
     worker_module.cancel_worker()
-    ctx = FakeHookContext(settings={"ops_room": "!ops:localhost", "extra_events": ["hot_reload_probe"]})
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def _log_during_send(room_id: str) -> None:
+        if not send_started.is_set():
+            send_started.set()
+            await release_send.wait()
+        logging.getLogger("mindroom.matrix.client_delivery").error(
+            {
+                "event": "matrix_message_send_failed",
+                "room_id": room_id,
+                "error": "502 Bad Gateway",
+                "cache_bypass": False,
+            },
+        )
+
+    ctx = FakeHookContext(
+        settings={"ops_room": "!ops:localhost", "extra_events": ["hot_reload_probe"]},
+        on_send=_log_during_send,
+    )
     module = importlib.reload(hooks)
+    old_worker = None
     try:
         await module.handle_bot_ready(ctx)
         old_worker = worker_module.current_worker()
         assert old_worker is not None
 
-        # A hot reload imports the plugin's modules fresh, without bot:ready, and cancels the tasks the old ones held.
+        logging.getLogger("mindroom.orchestrator").error({"event": "first_probe"})
+        await asyncio.wait_for(send_started.wait(), timeout=1)
+
+        # Hot reload imports fresh modules without bot:ready while old_worker is still mid-send.
+        importlib.reload(log_handler_module)
         importlib.reload(worker_module)
-        importlib.reload(hooks)
+        reloaded_hooks = importlib.reload(hooks)
+
+        release_send.set()
+        await asyncio.wait_for(old_worker.queue.join(), timeout=1)
+        assert list(reloaded_hooks._buffer) == []
+
         old_worker.cancel()
         await old_worker.wait_closed()
+        old_worker = None
 
+        # Resuming after reload still delivers alerts and shares the handed-over ContextVar.
         logging.getLogger("mindroom.orchestrator").error("hot_reload_probe")
         for _ in range(100):
-            if ctx.sent:
+            if len(ctx.sent) >= 2:
                 break
             await asyncio.sleep(0.01)
+        resumed_worker = worker_module.current_worker()
+        assert resumed_worker is not None
+        await asyncio.wait_for(resumed_worker.queue.join(), timeout=1)
 
-        assert [message["room_id"] for message in ctx.sent] == ["!ops:localhost"]
-        assert "hot_reload_probe" in ctx.sent[0]["text"]
+        assert [message["room_id"] for message in ctx.sent] == ["!ops:localhost", "!ops:localhost"]
+        assert "first_probe" in ctx.sent[0]["text"]
+        assert "hot_reload_probe" in ctx.sent[1]["text"]
+        assert all("matrix_message_send_failed" not in msg["text"] for msg in ctx.sent)
     finally:
+        release_send.set()
+        if old_worker is not None:
+            old_worker.cancel()
+            await old_worker.wait_closed()
         worker = worker_module.current_worker()
         worker_module.cancel_worker()
         if worker is not None:
             await worker.wait_closed()
-        _remove_installed_handlers()
+        remove_installed_handlers()

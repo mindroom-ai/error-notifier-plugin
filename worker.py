@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .formatter import extra_content_for, format_alert, format_suppression_summary
+from .log_handler import installed_sending_var
 from .models import NotifierSettings, ObservedError, ResolvedOpsRoom
 from .rate_limit import DecisionKind, RateLimiter
 from .rules import action_for, matches
@@ -61,6 +62,7 @@ class ErrorNotifierWorker:
         self._ctx = ctx
         self._settings = settings
         self._deps = deps or WorkerDeps()
+        self._sending = installed_sending_var()
         self._queue: asyncio.Queue[ObservedError] = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
         self._rate_limiter = RateLimiter(settings.rate_limit_seconds, clock=self._deps.clock or time.monotonic)
         self._task: asyncio.Task[None] | None = None
@@ -175,12 +177,16 @@ class ErrorNotifierWorker:
         if room is None:
             return
         try:
-            event_id = await self._ctx.send_message(
-                room_id=room.room_id,
-                text=body,
-                thread_id=None,
-                extra_content=extra_content,
-            )
+            token = self._sending.set(True)
+            try:
+                event_id = await self._ctx.send_message(
+                    room_id=room.room_id,
+                    text=body,
+                    thread_id=None,
+                    extra_content=extra_content,
+                )
+            finally:
+                self._sending.reset(token)
         except Exception as exc:
             _WARNING_LOGGER.warning(
                 "error-notifier failed to send alert",
