@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+from typing import Any
 
 import pytest
 from conftest import FakeHookContext, FakeMatrixAdmin
 from error_notifier_test_import import worker as worker_module
+from error_notifier_test_import.log_handler import HANDLER_NAME, install_error_log_handler
 from error_notifier_test_import.models import NotifierSettings, ObservedError
 from error_notifier_test_import.worker import ErrorNotifierWorker, WorkerDeps, resolve_ops_room
 
@@ -288,3 +291,180 @@ async def test_global_worker_lifecycle_functions() -> None:
     worker_module.cancel_worker()
     assert worker_module.current_worker() is None
     await worker.wait_closed()
+
+
+def _remove_installed_handlers() -> None:
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler.get_name() == HANDLER_NAME:
+            root.removeHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_errors_logged_during_send_are_dropped() -> None:
+    class FailingSendContext(FakeHookContext):
+        async def send_message(
+            self,
+            room_id: str,
+            text: str,
+            *,
+            thread_id: str | None = None,
+            extra_content: dict[str, Any] | None = None,
+            trigger_dispatch: bool = False,
+        ) -> str | None:
+            logging.getLogger("mindroom.matrix.client_delivery").error(
+                {
+                    "event": "matrix_message_send_failed",
+                    "room_id": room_id,
+                    "error": "502 Bad Gateway",
+                    "cache_bypass": False,
+                },
+            )
+            logging.getLogger("mindroom.bot").error(
+                {
+                    "event": "Failed to send hook message",
+                    "room_id": room_id,
+                    "source_hook": "error-notifier:bot:ready",
+                },
+            )
+            return await super().send_message(
+                room_id,
+                text,
+                thread_id=thread_id,
+                extra_content=extra_content,
+                trigger_dispatch=trigger_dispatch,
+            )
+
+    ctx = FailingSendContext(matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops:localhost"}), send_result=None)
+    received: list[ObservedError] = []
+    worker = ErrorNotifierWorker(ctx, NotifierSettings())
+
+    def _on_error(record: ObservedError) -> None:
+        received.append(record)
+        worker.submit(record)
+
+    install_error_log_handler(_on_error)
+    worker.start()
+    try:
+        logging.getLogger("mindroom.orchestrator").error({"event": "config_update_failed", "error": "boom"})
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+
+        assert [record.event for record in received] == ["config_update_failed"]
+        assert len(ctx.sent) == 1
+
+        # Even when send_message raises, the in-send flag is reset in finally so later errors are captured.
+        ctx.send_raises = RuntimeError("502")
+        logging.getLogger("mindroom.orchestrator").error({"event": "agent_start_failed", "error": "boom"})
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+
+        ctx.send_raises = None
+        ctx.send_result = "$event"
+        logging.getLogger("mindroom.matrix.client_delivery").error(
+            {
+                "event": "matrix_message_send_failed",
+                "room_id": "!other:localhost",
+                "error": "502 Bad Gateway",
+                "cache_bypass": False,
+            },
+        )
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+
+        assert [record.event for record in received] == [
+            "config_update_failed",
+            "agent_start_failed",
+            "matrix_message_send_failed",
+        ]
+        assert len(ctx.sent) == 2
+        assert "matrix_message_send_failed" in ctx.sent[1]["text"]
+    finally:
+        worker.cancel()
+        await worker.wait_closed()
+        _remove_installed_handlers()
+
+
+@pytest.mark.asyncio
+async def test_client_delivery_error_outside_send_is_received() -> None:
+    ctx = _ctx()
+    received: list[ObservedError] = []
+    worker = ErrorNotifierWorker(ctx, NotifierSettings())
+
+    def _on_error(record: ObservedError) -> None:
+        received.append(record)
+        worker.submit(record)
+
+    install_error_log_handler(_on_error)
+    worker.start()
+    try:
+        logging.getLogger("mindroom.matrix.client_delivery").error(
+            {
+                "event": "matrix_message_send_failed",
+                "room_id": "!room:localhost",
+                "error": "502 Bad Gateway",
+                "cache_bypass": False,
+            },
+        )
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+
+        assert [record.event for record in received] == ["matrix_message_send_failed"]
+        assert len(ctx.sent) == 1
+        assert "matrix_message_send_failed" in ctx.sent[0]["text"]
+    finally:
+        worker.cancel()
+        await worker.wait_closed()
+        _remove_installed_handlers()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_error_during_send_is_still_received() -> None:
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    class PausingSendContext(FakeHookContext):
+        async def send_message(
+            self,
+            room_id: str,
+            text: str,
+            *,
+            thread_id: str | None = None,
+            extra_content: dict[str, Any] | None = None,
+            trigger_dispatch: bool = False,
+        ) -> str | None:
+            if not send_started.is_set():
+                send_started.set()
+                await release_send.wait()
+            return await super().send_message(
+                room_id,
+                text,
+                thread_id=thread_id,
+                extra_content=extra_content,
+                trigger_dispatch=trigger_dispatch,
+            )
+
+    ctx = PausingSendContext(matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops:localhost"}))
+    received: list[ObservedError] = []
+    worker = ErrorNotifierWorker(ctx, NotifierSettings())
+
+    def _on_error(record: ObservedError) -> None:
+        received.append(record)
+        worker.submit(record)
+
+    install_error_log_handler(_on_error)
+    worker.start()
+    try:
+        logging.getLogger("mindroom.orchestrator").error({"event": "config_update_failed"})
+        await asyncio.wait_for(send_started.wait(), timeout=1)
+
+        # Another task's send failure while the notifier is awaiting its own send must still be captured.
+        logging.getLogger("mindroom.matrix.client_delivery").error(
+            {"event": "matrix_message_send_failed", "room_id": "!agent:localhost", "error": "502"},
+        )
+        release_send.set()
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+
+        assert [record.event for record in received] == ["config_update_failed", "matrix_message_send_failed"]
+        assert len(ctx.sent) == 2
+    finally:
+        release_send.set()
+        worker.cancel()
+        await worker.wait_closed()
+        _remove_installed_handlers()

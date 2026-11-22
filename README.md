@@ -57,7 +57,7 @@ Set `MINDROOM_ERROR_NOTIFIER_DISABLED=1` to turn it off without editing the conf
 
 - Only records at `error` level.
 - Every logger under `mindroom`, and `livekit` for calls.
-- Not `mindroom.event_loop_stall`, which reports slowness at error level, and not the plugin's own logger or its own failed hook sends.
+- Not `mindroom.event_loop_stall`, which reports slowness at error level, not the plugin's own logger, and not errors logged while the plugin itself is sending an alert.
 - Not Agno's loggers: their errors are a model's bad tool arguments and failed web fetches, which the agent already sees.
 
 A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` is one error whatever its arguments; the formatted text appears on the `error:` line.

@@ -8,8 +8,6 @@ from collections.abc import Mapping
 from .models import DEFAULT_RATE_LIMIT_SECONDS, NotifierSettings, ObservedError
 
 FEEDBACK_LOOP_LOGGER_PREFIX = "mindroom.plugins.error_notifier"
-# Core logs failed hook sends under its own logger, tagged with the hook source ("<plugin name>:...").
-FEEDBACK_LOOP_SOURCE_HOOK_PREFIX = "error-notifier:"
 # Every MindRoom logger, and LiveKit's for calls. Agno is left out: its errors are a model's bad tool arguments and
 # failed web fetches, which the agent already sees, worded per call.
 DEFAULT_LOGGERS = ("mindroom", "livekit")
@@ -93,8 +91,6 @@ def matches(record: ObservedError, settings: NotifierSettings) -> bool:
         return False
     ignored = (FEEDBACK_LOOP_LOGGER_PREFIX, *DEFAULT_IGNORED_LOGGERS, *settings.ignore_loggers)
     if any(_logger_matches(record.logger, logger_name) for logger_name in ignored):
-        return False
-    if str(record.event_dict.get("source_hook") or "").startswith(FEEDBACK_LOOP_SOURCE_HOOK_PREFIX):
         return False
 
     loggers = (*DEFAULT_LOGGERS, *settings.extra_loggers)

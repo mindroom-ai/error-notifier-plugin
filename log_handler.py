@@ -11,6 +11,7 @@ import logging
 import sys
 import traceback
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any
@@ -22,6 +23,7 @@ from .rules import FEEDBACK_LOOP_LOGGER_PREFIX
 
 HANDLER_NAME = "mindroom-error-notifier"
 _MAX_EXCEPTION_CHARS = 8192
+_SENDING_ALERT: ContextVar[bool] = ContextVar("mindroom_error_notifier_sending", default=False)
 
 _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 
@@ -30,20 +32,27 @@ class ErrorLogHandler(logging.Handler):
     """Pass each ERROR record to a callback as a redacted `ObservedError`; never raise into the caller.
 
     The handler also keeps what the plugin learned at `bot:ready` (the service hook context, the plugin settings,
-    and the event loop), because a plugin hot reload imports fresh modules without firing `bot:ready` again.
+    the event loop, and the in-send `ContextVar`), because a plugin hot reload imports fresh modules without
+    firing `bot:ready` again.
     """
 
-    def __init__(self, callback: Callable[[ObservedError], None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[ObservedError], None],
+        *,
+        sending: ContextVar[bool] | None = None,
+    ) -> None:
         super().__init__(level=logging.ERROR)
         self.set_name(HANDLER_NAME)
         self._callback = callback
         self.context: Any = None
         self.raw_settings: dict[str, Any] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.sending: ContextVar[bool] = _SENDING_ALERT if sending is None else sending
 
     def emit(self, record: logging.LogRecord) -> None:
         """Convert and hand over one record."""
-        if record.name.startswith(FEEDBACK_LOOP_LOGGER_PREFIX):
+        if record.name.startswith(FEEDBACK_LOOP_LOGGER_PREFIX) or self.sending.get():
             return
         try:
             self._callback(observed_error_from_record(record))
@@ -61,9 +70,21 @@ def install_error_log_handler(callback: Callable[[ObservedError], None]) -> Erro
                 handler.context = getattr(previous, "context", None)
                 handler.raw_settings = previous.raw_settings
                 handler.loop = getattr(previous, "loop", None)
+            if isinstance(getattr(previous, "sending", None), ContextVar):
+                handler.sending = previous.sending
             root.removeHandler(previous)
     root.addHandler(handler)
     return handler
+
+
+def installed_sending_var() -> ContextVar[bool]:
+    """Return the active handler's in-send flag, or this module's flag before install."""
+    for handler in logging.getLogger().handlers:
+        if handler.get_name() == HANDLER_NAME:
+            sending = getattr(handler, "sending", None)
+            if isinstance(sending, ContextVar):
+                return sending
+    return _SENDING_ALERT
 
 
 def observed_error_from_record(record: logging.LogRecord) -> ObservedError:

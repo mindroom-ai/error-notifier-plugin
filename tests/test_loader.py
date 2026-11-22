@@ -6,10 +6,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from typing import Any
 
 import pytest
 from conftest import FakeHookContext
 from error_notifier_test_import import hooks
+from error_notifier_test_import import log_handler as log_handler_module
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
 from mindroom.hooks import EVENT_BOT_READY
@@ -72,6 +74,91 @@ async def test_alerts_continue_after_a_plugin_hot_reload() -> None:
         assert [message["room_id"] for message in ctx.sent] == ["!ops:localhost"]
         assert "hot_reload_probe" in ctx.sent[0]["text"]
     finally:
+        worker = worker_module.current_worker()
+        worker_module.cancel_worker()
+        if worker is not None:
+            await worker.wait_closed()
+        _remove_installed_handlers()
+
+
+@pytest.mark.asyncio
+async def test_in_send_suppression_survives_plugin_hot_reload() -> None:
+    worker_module.cancel_worker()
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    class LoggingSendContext(FakeHookContext):
+        async def send_message(
+            self,
+            room_id: str,
+            text: str,
+            *,
+            thread_id: str | None = None,
+            extra_content: dict[str, Any] | None = None,
+            trigger_dispatch: bool = False,
+        ) -> str | None:
+            if not send_started.is_set():
+                send_started.set()
+                await release_send.wait()
+            logging.getLogger("mindroom.matrix.client_delivery").error(
+                {
+                    "event": "matrix_message_send_failed",
+                    "room_id": room_id,
+                    "error": "502 Bad Gateway",
+                    "cache_bypass": False,
+                },
+            )
+            return await super().send_message(
+                room_id,
+                text,
+                thread_id=thread_id,
+                extra_content=extra_content,
+                trigger_dispatch=trigger_dispatch,
+            )
+
+    ctx = LoggingSendContext(settings={"ops_room": "!ops:localhost"})
+    module = importlib.reload(hooks)
+    old_worker = None
+    try:
+        await module.handle_bot_ready(ctx)
+        old_worker = worker_module.current_worker()
+        assert old_worker is not None
+
+        logging.getLogger("mindroom.orchestrator").error({"event": "first_probe"})
+        await asyncio.wait_for(send_started.wait(), timeout=1)
+
+        # Hot reload installs a fresh handler from a fresh log_handler import while old_worker is still mid-send.
+        importlib.reload(log_handler_module)
+        importlib.reload(worker_module)
+        reloaded_hooks = importlib.reload(hooks)
+
+        release_send.set()
+        await asyncio.wait_for(old_worker.queue.join(), timeout=1)
+        assert list(reloaded_hooks._buffer) == []
+
+        old_worker.cancel()
+        await old_worker.wait_closed()
+        old_worker = None
+
+        # The resumed worker from the new import also shares the handed-over ContextVar with the reloaded handler.
+        logging.getLogger("mindroom.orchestrator").error({"event": "second_probe"})
+        for _ in range(100):
+            if len(ctx.sent) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        resumed_worker = worker_module.current_worker()
+        assert resumed_worker is not None
+        await asyncio.wait_for(resumed_worker.queue.join(), timeout=1)
+
+        assert len(ctx.sent) == 2
+        assert "first_probe" in ctx.sent[0]["text"]
+        assert "second_probe" in ctx.sent[1]["text"]
+        assert all("matrix_message_send_failed" not in msg["text"] for msg in ctx.sent)
+    finally:
+        release_send.set()
+        if old_worker is not None:
+            old_worker.cancel()
+            await old_worker.wait_closed()
         worker = worker_module.current_worker()
         worker_module.cancel_worker()
         if worker is not None:

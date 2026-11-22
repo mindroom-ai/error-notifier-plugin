@@ -6,10 +6,12 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .formatter import extra_content_for, format_alert, format_suppression_summary
+from .log_handler import installed_sending_var
 from .models import NotifierSettings, ObservedError, ResolvedOpsRoom
 from .rate_limit import DecisionKind, RateLimiter
 from .rules import action_for, matches
@@ -57,10 +59,12 @@ class ErrorNotifierWorker:
         settings: NotifierSettings,
         *,
         deps: WorkerDeps | None = None,
+        sending: ContextVar[bool] | None = None,
     ) -> None:
         self._ctx = ctx
         self._settings = settings
         self._deps = deps or WorkerDeps()
+        self._sending = installed_sending_var() if sending is None else sending
         self._queue: asyncio.Queue[ObservedError] = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
         self._rate_limiter = RateLimiter(settings.rate_limit_seconds, clock=self._deps.clock or time.monotonic)
         self._task: asyncio.Task[None] | None = None
@@ -174,6 +178,7 @@ class ErrorNotifierWorker:
         room = await self._resolve_ops_room()
         if room is None:
             return
+        token = self._sending.set(True)
         try:
             event_id = await self._ctx.send_message(
                 room_id=room.room_id,
@@ -187,6 +192,8 @@ class ErrorNotifierWorker:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             return
+        finally:
+            self._sending.reset(token)
         if event_id is None:
             _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
 
@@ -223,11 +230,12 @@ def start_worker(
     settings: NotifierSettings,
     *,
     deps: WorkerDeps | None = None,
+    sending: ContextVar[bool] | None = None,
 ) -> ErrorNotifierWorker:
     """Start or reconfigure the module-global worker."""
     global _worker
     if _worker is None:
-        _worker = ErrorNotifierWorker(ctx, settings, deps=deps)
+        _worker = ErrorNotifierWorker(ctx, settings, deps=deps, sending=sending)
     else:
         _worker.update_settings(settings)
     _worker.start()
