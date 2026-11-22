@@ -303,6 +303,9 @@ async def test_errors_logged_during_send_are_dropped() -> None:
                 "cache_bypass": False,
             },
         )
+        logging.getLogger("mindroom.bot").error(
+            {"event": "Failed to send hook message", "room_id": room_id, "source_hook": "error-notifier:bot:ready"},
+        )
 
     ctx = FakeHookContext(
         matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops:localhost"}),
