@@ -8,17 +8,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from conftest import remove_installed_handlers
 from error_notifier_test_import.log_handler import HANDLER_NAME, install_error_log_handler
 from error_notifier_test_import.models import ObservedError
 from mindroom.constants import RuntimePaths
 from mindroom.logging_config import get_logger, setup_logging
-
-
-def _remove_installed_handlers() -> None:
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        if handler.get_name() == HANDLER_NAME:
-            root.removeHandler(handler)
 
 
 @pytest.fixture
@@ -35,7 +29,7 @@ def received(tmp_path: Path) -> Iterator[list[ObservedError]]:
     records: list[ObservedError] = []
     install_error_log_handler(records.append)
     yield records
-    _remove_installed_handlers()
+    remove_installed_handlers()
 
 
 def test_structlog_error_arrives_redacted(received: list[ObservedError]) -> None:

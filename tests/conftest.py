@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,15 @@ def _load_plugin_test_package() -> None:
 _load_plugin_test_package()
 
 
+def remove_installed_handlers() -> None:
+    from error_notifier_test_import.log_handler import HANDLER_NAME
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler.get_name() == HANDLER_NAME:
+            root.removeHandler(handler)
+
+
 @dataclass
 class FakeMatrixAdmin:
     aliases: dict[str, str | None] = field(default_factory=dict)
@@ -51,6 +62,7 @@ class FakeHookContext:
     sent: list[dict[str, Any]] = field(default_factory=list)
     send_result: str | None = "$event"
     send_raises: BaseException | None = None
+    on_send: Callable[[str], Awaitable[None]] | None = None
 
     async def send_message(
         self,
@@ -62,6 +74,8 @@ class FakeHookContext:
         trigger_dispatch: bool = False,
     ) -> str | None:
         del trigger_dispatch
+        if self.on_send is not None:
+            await self.on_send(room_id)
         if self.send_raises is not None:
             raise self.send_raises
         self.sent.append(

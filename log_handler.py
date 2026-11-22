@@ -36,19 +36,14 @@ class ErrorLogHandler(logging.Handler):
     firing `bot:ready` again.
     """
 
-    def __init__(
-        self,
-        callback: Callable[[ObservedError], None],
-        *,
-        sending: ContextVar[bool] | None = None,
-    ) -> None:
+    def __init__(self, callback: Callable[[ObservedError], None]) -> None:
         super().__init__(level=logging.ERROR)
         self.set_name(HANDLER_NAME)
         self._callback = callback
         self.context: Any = None
         self.raw_settings: dict[str, Any] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.sending: ContextVar[bool] = _SENDING_ALERT if sending is None else sending
+        self.sending: ContextVar[bool] = _SENDING_ALERT
 
     def emit(self, record: logging.LogRecord) -> None:
         """Convert and hand over one record."""

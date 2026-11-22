@@ -32,8 +32,7 @@ def _observer(observed: ObservedError) -> None:
 
 
 def _start(ctx: object, raw_settings: dict[str, object]) -> ErrorNotifierWorker:
-    sending = None if _handler is None else _handler.sending
-    worker = start_worker(ctx, settings_from_mapping(raw_settings), sending=sending)
+    worker = start_worker(ctx, settings_from_mapping(raw_settings))
     buffered = len(_buffer)
     while _buffer:
         worker.submit(_buffer.popleft())

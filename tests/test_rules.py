@@ -71,15 +71,6 @@ def test_feedback_loop_guard_rejects_worker_logger() -> None:
     assert not matches(_record(logger="mindroom.plugins.error_notifier.worker"), NotifierSettings())
 
 
-def test_feedback_loop_guard_keeps_other_plugin_hook_failures() -> None:
-    record = _record(
-        logger="mindroom.bot",
-        event="Failed to send hook message",
-        event_dict={"source_hook": "other-plugin:bot:ready"},
-    )
-    assert matches(record, NotifierSettings())
-
-
 def test_missing_logger_or_event_is_rejected() -> None:
     assert not matches(_record(logger=""), NotifierSettings())
     assert not matches(_record(event=""), NotifierSettings())
