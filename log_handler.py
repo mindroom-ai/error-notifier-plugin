@@ -19,6 +19,7 @@ from typing import Any
 from mindroom.plugin_api import redact_sensitive_text
 from mindroom.redaction import redact_log_event
 
+from .formatter import traceback_summary
 from .models import ObservedError
 from .rules import FEEDBACK_LOOP_LOGGER_PREFIX
 
@@ -102,16 +103,17 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
     event_dict.setdefault("timestamp", datetime.fromtimestamp(record.created, UTC).isoformat())
 
     redacted = redact_log_event(None, record.levelname.lower(), event_dict)
-    exception = _format_exc_info(exc_info)
-    if exception is None and redacted.get("exception") is not None:
-        exception = _truncate(redact_sensitive_text(str(redacted["exception"])))
+    full_exception = _format_exc_info(exc_info)
+    if full_exception is None and redacted.get("exception") is not None:
+        full_exception = redact_sensitive_text(str(redacted["exception"]))
     return ObservedError(
         logger=str(redacted.get("logger") or record.name),
         level=str(redacted.get("level") or record.levelname.lower()),
         event=str(redacted.get("event") or ""),
         timestamp=None if redacted.get("timestamp") is None else str(redacted["timestamp"]),
         event_dict=redacted,
-        exception=exception,
+        exception=None if full_exception is None else _truncate(full_exception),
+        exception_summary=None if full_exception is None else traceback_summary(full_exception),
     )
 
 
@@ -119,8 +121,7 @@ def _format_exc_info(exc_info: object) -> str | None:
     normalized = _normalize_exc_info(exc_info)
     if normalized is None:
         return None
-    rendered = "".join(traceback.format_exception(*normalized))
-    return _truncate(redact_sensitive_text(rendered))
+    return redact_sensitive_text("".join(traceback.format_exception(*normalized)))
 
 
 def _normalize_exc_info(exc_info: object) -> _ExcInfo | None:

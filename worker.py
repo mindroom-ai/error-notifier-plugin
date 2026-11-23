@@ -17,7 +17,6 @@ from .rules import action_for, matches
 
 QUEUE_MAX_SIZE = 1000
 _SEND_RETRY_BACKOFF_SECONDS = 4.0
-_SEND_EXCEPTION = object()
 _WARNING_LOGGER = logging.getLogger("mindroom.plugins.error_notifier.worker")
 
 
@@ -179,22 +178,22 @@ class ErrorNotifierWorker:
         room = await self._resolve_ops_room()
         if room is None:
             return
-        if await self._attempt_send(room, body, extra_content) is None:
+        if await self._attempt_send(room, body, extra_content):
             task = asyncio.create_task(self._retry_send(room, body, extra_content), name="error-notifier-retry")
             _retry_tasks.add(task)
             task.add_done_callback(_retry_tasks.discard)
 
     async def _retry_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> None:
         await self._deps.sleep(_SEND_RETRY_BACKOFF_SECONDS)
-        if await self._attempt_send(room, body, extra_content) is None:
+        if await self._attempt_send(room, body, extra_content):
             _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
 
-    async def _attempt_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> object:
-        """Send one message, returning its event id, None when none was returned, or _SEND_EXCEPTION on error."""
+    async def _attempt_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> bool:
+        """Send one message; return True only when no event id was returned (needs retry)."""
         try:
             token = self._sending.set(True)
             try:
-                return await self._ctx.send_message(
+                event_id = await self._ctx.send_message(
                     room_id=room.room_id,
                     text=body,
                     thread_id=None,
@@ -207,7 +206,8 @@ class ErrorNotifierWorker:
                 "error-notifier failed to send alert",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-            return _SEND_EXCEPTION
+            return False
+        return event_id is None
 
     async def _resolve_ops_room(self) -> ResolvedOpsRoom | None:
         if self._resolved_room is not None:

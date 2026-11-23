@@ -80,11 +80,8 @@ def _display_error(record: ObservedError) -> str | None:
     error = record.event_dict.get("error")
     if error is not None:
         return _escape_markdown_text(str(error))
-    if record.exception:
-        summary = _traceback_summary(record.exception)
-        if summary:
-            return _escape_markdown_text(summary)
-    return None
+    summary = record.exception_summary or (traceback_summary(record.exception) if record.exception else None)
+    return _escape_markdown_text(summary) if summary else None
 
 
 def _is_border(line: str) -> bool:
@@ -92,23 +89,20 @@ def _is_border(line: str) -> bool:
     return stripped.startswith("+-") and "---" in stripped and set(stripped) <= _BORDER_CHARS
 
 
-def _traceback_summary(exception: str) -> str | None:
-    truncated = "\n…\n" in exception
-    if truncated:
-        exception = exception.rsplit("\n…\n", maxsplit=1)[1]
+def traceback_summary(exception: str) -> str | None:
+    """Return a short summary (final exception line and raising frame) of a traceback."""
     lines = [
         cleaned
         for raw in exception.splitlines()
         if (cleaned := _GUTTER_RE.sub("", raw)).strip() and not _is_border(raw)
     ]
     if not lines:
-        return "…" if truncated else None
+        return None
     start = max((i + 1 for i, line in enumerate(lines) if line.strip().startswith(_CHAIN_MARKERS)), default=0)
     section = lines[start:] or lines
     frames = [(i, match.group(1)) for i, line in enumerate(section) if (match := _FRAME_RE.match(line))]
     if not frames:
-        line = section[-1] if truncated else section[0]
-        return _cap(line.strip(), _MAX_SUMMARY_CHARS)
+        return _cap(section[0].strip(), _MAX_SUMMARY_CHARS)
     frame_idx, frame = frames[-1]
     exc_line = next((line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace()), None)
     if not exc_line:

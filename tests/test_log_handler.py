@@ -15,6 +15,7 @@ from error_notifier_test_import.log_handler import (
     HANDLER_NAME,
     _truncate,
     install_error_log_handler,
+    observed_error_from_record,
 )
 from error_notifier_test_import.models import ObservedError
 from mindroom.logging_config import setup_logging
@@ -103,15 +104,48 @@ def test_truncate_keeps_head_and_tail_within_cap() -> None:
     assert "\n…\n" in truncated
     assert truncated.endswith(tail)
 
-    body = format_alert(
-        ObservedError(
-            logger="mindroom.matrix.client_delivery",
-            level="error",
-            event="matrix_message_send_failed",
-            timestamp="2026-11-22T20:45:32+00:00",
-            exception=truncated,
-        ),
-        None,
+    raw_record = logging.LogRecord(
+        name="mindroom.matrix.client_delivery",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg={"event": "matrix_message_send_failed", "exception": head + middle + tail},
+        args=(),
+        exc_info=None,
     )
+    observed = observed_error_from_record(raw_record)
+    assert observed.exception == truncated
+    body = format_alert(observed, None)
     assert "error:  nio.exceptions.RoomSendError: unknown error" in body
     assert 'File "/app/nio/client.py", line 812, in room\\_send' in body
+
+
+def test_long_exception_message_preserves_type_and_frame_in_alert(received: list[ObservedError]) -> None:
+    def _raise_bad_gateway() -> None:
+        raise RuntimeError(f"Bad gateway (502): {'upstream body; ' * 650}")
+
+    def _raise_huge_value() -> None:
+        raise ValueError("Y" * 12000)
+
+    try:
+        _raise_bad_gateway()
+    except RuntimeError:
+        get_logger("mindroom.matrix.client_delivery").exception("matrix_message_send_failed")
+
+    try:
+        _raise_huge_value()
+    except ValueError:
+        get_logger("mindroom.ai").exception("streaming_failed")
+
+    first, second = received
+    assert first.exception is not None and len(first.exception) == _MAX_EXCEPTION_CHARS
+    first_body = format_alert(first, None)
+    assert "RuntimeError" in first_body
+    assert "502" in first_body
+    assert "in \\_raise\\_bad\\_gateway" in first_body
+
+    assert second.exception is not None and len(second.exception) == _MAX_EXCEPTION_CHARS
+    second_body = format_alert(second, None)
+    assert "error:  ValueError: YYY" in second_body
+    assert "…\n" in second_body
+    assert "in \\_raise\\_huge\\_value" in second_body

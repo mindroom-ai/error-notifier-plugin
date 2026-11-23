@@ -204,17 +204,12 @@ def test_pathological_divider_line_formats_quickly() -> None:
     assert "error:" in body
 
 
-def test_truncated_exception_without_tail_frame_never_uses_head_frame() -> None:
-    tb = (
-        "Traceback (most recent call last):\n"
-        '  File "/app/head_only.py", line 1, in outer_entry\n'
-        "    run()\n"
-        "\n…\n"
-        "mid-word fragment of huge payload\n"
-        "final tail detail\n"
-    )
+def test_syntax_error_traceback_shows_exception_and_file_line() -> None:
+    try:
+        compile("def bad(:\n  pass", "/app/bad.py", "exec")
+    except SyntaxError:
+        tb = traceback.format_exc()
     body = format_alert(_record(event_dict={}, exception=tb), None)
 
-    assert "error:  final tail detail" in body
-    assert "head\\_only.py" not in body
-    assert "mid-word fragment" not in body
+    assert "error:  SyntaxError: invalid syntax\n" in body
+    assert 'File "/app/bad.py", line 1' in body
