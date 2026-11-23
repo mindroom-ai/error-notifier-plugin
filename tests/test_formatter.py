@@ -92,3 +92,59 @@ def test_error_line_omitted_without_error_or_exception() -> None:
     body = format_alert(_record(event_dict={}, exception=None), None)
 
     assert "\nerror:" not in body
+
+
+def test_traceback_shows_final_exception_line_and_raising_frame() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/mindroom/ai.py", line 42, in stream_response\n'
+        "    await send()\n"
+        '  File "/app/nio/client.py", line 812, in room_send\n'
+        '    raise RoomSendError("unknown error")\n'
+        "    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+        "nio.exceptions.RoomSendError: unknown error\n"
+    )
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+
+    assert (
+        "error:  nio.exceptions.RoomSendError: unknown error\n"
+        '        File "/app/nio/client.py", line 812, in room\\_send'
+    ) in body
+    assert "Traceback" not in body
+
+
+def test_chained_traceback_uses_final_exception_and_frame() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/a.py", line 10, in inner\n'
+        "    1 / 0\n"
+        "ZeroDivisionError: division by zero\n\n"
+        "During handling of the above exception, another exception occurred:\n\n"
+        "Traceback (most recent call last):\n"
+        '  File "/app/b.py", line 20, in outer_fn\n'
+        '    raise RateLimited("openai/gpt-4o is temporarily rate-limited")\n'
+        "RateLimited: openai/gpt-4o is temporarily rate-limited\n"
+        "detail line\n"
+    )
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+
+    assert (
+        "error:  RateLimited: openai/gpt-4o is temporarily rate-limited\n"
+        '        File "/app/b.py", line 20, in outer\\_fn'
+    ) in body
+    assert "ZeroDivisionError" not in body
+
+
+def test_direct_cause_chained_traceback_without_outer_frame() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/a.py", line 10, in inner\n'
+        "    1 / 0\n"
+        "ZeroDivisionError: division by zero\n\n"
+        "The above exception was the direct cause of the following exception:\n\n"
+        "RuntimeError: outer failure\n"
+    )
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+
+    assert "error:  RuntimeError: outer failure" in body
+    assert "ZeroDivisionError" not in body

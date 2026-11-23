@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from mindroom.matrix.message_extras import (
@@ -11,6 +12,13 @@ from mindroom.matrix.message_extras import (
 )
 
 from .models import ObservedError
+
+_FRAME_RE = re.compile(r'^\s*(File ".+", line \d+(?:, in .+)?)$')
+_CHAIN_MARKERS = (
+    "Traceback (most recent call last):",
+    "During handling of the above exception,",
+    "The above exception was the direct cause",
+)
 
 
 def format_alert(record: ObservedError, action: str | None) -> str:
@@ -68,10 +76,27 @@ def _display_error(record: ObservedError) -> str | None:
     if error is not None:
         return _escape_markdown_text(str(error))
     if record.exception:
-        lines = record.exception.splitlines()
-        if lines:
-            return _escape_markdown_text(lines[0])
+        summary = _traceback_summary(record.exception)
+        if summary:
+            return _escape_markdown_text(summary)
     return None
+
+
+def _traceback_summary(exception: str) -> str | None:
+    lines = [line for line in exception.splitlines() if line.strip()]
+    if not lines:
+        return None
+    start = max((i + 1 for i, line in enumerate(lines) if line.strip().startswith(_CHAIN_MARKERS)), default=0)
+    section = lines[start:] or lines
+    frames = [(i, match.group(1)) for i, line in enumerate(section) if (match := _FRAME_RE.match(line))]
+    if not frames:
+        return section[0].strip()
+    frame_idx, frame = frames[-1]
+    exc_line = next(
+        (line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace() and line.strip() != "…"),
+        None,
+    )
+    return f"{exc_line}\n{frame}" if exc_line else frame
 
 
 def _format_error_lines(error_text: str) -> list[str]:
