@@ -3,7 +3,16 @@
 
 from __future__ import annotations
 
-from error_notifier_test_import.formatter import extra_content_for, format_alert, format_suppression_summary
+import asyncio
+import traceback
+
+import pytest
+from error_notifier_test_import.formatter import (
+    _MAX_SUMMARY_CHARS,
+    extra_content_for,
+    format_alert,
+    format_suppression_summary,
+)
 from error_notifier_test_import.models import ObservedError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 
@@ -148,3 +157,37 @@ def test_direct_cause_chained_traceback_without_outer_frame() -> None:
 
     assert "error:  RuntimeError: outer failure" in body
     assert "ZeroDivisionError" not in body
+
+
+@pytest.mark.asyncio
+async def test_real_taskgroup_traceback_shows_child_exception_and_frame() -> None:
+    async def _failing_child() -> None:
+        raise RuntimeError("task child boom")
+
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_failing_child())
+    except BaseException:
+        tb = traceback.format_exc()
+
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+
+    assert "error:  RuntimeError: task child boom\n" in body
+    assert "in \\_failing\\_child" in body
+    assert "Exception Group Traceback" not in body
+
+
+def test_long_traceback_summary_is_capped() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/client.py", line 12, in send\n'
+        "    raise RuntimeError()\n"
+        f"RuntimeError: {'x' * 500}\n"
+    )
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+    error_lines = [line for line in body.splitlines() if line.startswith(("error:", "        "))]
+    summary_len = sum(len(line) - 8 for line in error_lines) + len(error_lines) - 1
+
+    assert summary_len <= _MAX_SUMMARY_CHARS
+    assert "…\n" in body
+    assert 'File "/app/client.py", line 12, in send' in body

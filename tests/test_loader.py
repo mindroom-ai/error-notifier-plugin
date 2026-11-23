@@ -13,8 +13,11 @@ from error_notifier_test_import import hooks
 from error_notifier_test_import import log_handler as log_handler_module
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import HANDLER_NAME
+from error_notifier_test_import.models import NotifierSettings, ObservedError
+from error_notifier_test_import.worker import WorkerDeps
 from mindroom.hooks.decorators import get_hook_metadata, iter_module_hooks
 from mindroom.plugin_api import EVENT_BOT_READY
+from mindroom.tool_system.plugins import _cancel_module_tasks
 
 
 def test_importing_hooks_buffers_errors_until_the_worker_starts() -> None:
@@ -111,3 +114,43 @@ async def test_alerts_and_in_send_suppression_survive_a_plugin_hot_reload() -> N
         if worker is not None:
             await worker.wait_closed()
         remove_installed_handlers()
+
+
+@pytest.mark.asyncio
+async def test_hot_reload_cancels_pending_retry_tasks() -> None:
+    worker_module.cancel_worker()
+    retry_sleeping = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def _sleep(_seconds: float) -> None:
+        retry_sleeping.set()
+        await release_retry.wait()
+
+    ctx = FakeHookContext(send_result=None)
+    worker = worker_module.start_worker(
+        ctx,
+        NotifierSettings(ops_room="!ops:localhost", extra_events=("reload_retry_probe",)),
+        deps=WorkerDeps(sleep=_sleep),
+    )
+    try:
+        worker.submit(
+            ObservedError(
+                logger="mindroom.orchestrator",
+                level="error",
+                event="reload_retry_probe",
+                timestamp="2026-11-22T20:45:32+00:00",
+            ),
+        )
+        await asyncio.wait_for(retry_sleeping.wait(), timeout=1)
+        [retry_task] = list(worker_module._retry_tasks)
+
+        _cancel_module_tasks((worker_module,))
+        release_retry.set()
+        await worker.wait_closed()
+
+        assert retry_task.cancelled()
+        assert len(ctx.sent) == 1
+    finally:
+        release_retry.set()
+        worker_module.cancel_worker()
+        await worker.wait_closed()

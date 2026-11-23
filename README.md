@@ -84,6 +84,7 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts. A 
 
 - It sees only errors MindRoom logs; a crash that kills the process before logging sends nothing.
 - Alerts go to a room that a running MindRoom bot can post in.
+- If the homeserver returns no event id, an alert may be retried once after a short delay (a rare duplicate is possible).
 - `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (hooks, redaction, message extras); re-run it after each upgrade.
 
 </details>
