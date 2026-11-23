@@ -24,6 +24,8 @@ from .rules import FEEDBACK_LOOP_LOGGER_PREFIX
 
 HANDLER_NAME = "mindroom-error-notifier"
 _MAX_EXCEPTION_CHARS = 8192
+_TRUNCATION_HEAD_CHARS = 2048
+_TRUNCATION_MARKER = "\n…\n"
 _SENDING_ALERT: ContextVar[bool] = ContextVar("mindroom_error_notifier_sending", default=False)
 
 _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
@@ -139,4 +141,5 @@ def _normalize_exc_info(exc_info: object) -> _ExcInfo | None:
 def _truncate(value: str) -> str:
     if len(value) <= _MAX_EXCEPTION_CHARS:
         return value
-    return value[: _MAX_EXCEPTION_CHARS - 15] + "... [truncated]"
+    tail_chars = _MAX_EXCEPTION_CHARS - _TRUNCATION_HEAD_CHARS - len(_TRUNCATION_MARKER)
+    return f"{value[:_TRUNCATION_HEAD_CHARS]}{_TRUNCATION_MARKER}{value[-tail_chars:]}"

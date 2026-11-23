@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 from conftest import remove_installed_handlers
-from error_notifier_test_import.log_handler import HANDLER_NAME, install_error_log_handler
+from error_notifier_test_import.formatter import format_alert
+from error_notifier_test_import.log_handler import (
+    _MAX_EXCEPTION_CHARS,
+    HANDLER_NAME,
+    _truncate,
+    install_error_log_handler,
+)
 from error_notifier_test_import.models import ObservedError
 from mindroom.logging_config import setup_logging
 from mindroom.plugin_api import RuntimePaths, get_logger
@@ -77,3 +83,35 @@ def test_reinstalling_replaces_the_previous_handler(received: list[ObservedError
     assert sum(handler.get_name() == HANDLER_NAME for handler in logging.getLogger().handlers) == 1
     assert received == []
     assert len(later) == 1
+
+
+def test_truncate_keeps_head_and_tail_within_cap() -> None:
+    exact = "x" * _MAX_EXCEPTION_CHARS
+    assert _truncate(exact) == exact
+
+    head = 'Traceback (most recent call last):\n  File "/app/top.py", line 1, in entry\n    run()\n'
+    middle = '  File "/app/deep.py", line 10, in step\n    await next_step()\n' * 200
+    tail = (
+        '  File "/app/nio/client.py", line 812, in room_send\n'
+        "    raise RoomSendError()\n"
+        "nio.exceptions.RoomSendError: unknown error\n"
+    )
+    truncated = _truncate(head + middle + tail)
+
+    assert len(truncated) == _MAX_EXCEPTION_CHARS
+    assert truncated.startswith(head)
+    assert "\n…\n" in truncated
+    assert truncated.endswith(tail)
+
+    body = format_alert(
+        ObservedError(
+            logger="mindroom.matrix.client_delivery",
+            level="error",
+            event="matrix_message_send_failed",
+            timestamp="2026-11-22T20:45:32+00:00",
+            exception=truncated,
+        ),
+        None,
+    )
+    assert "error:  nio.exceptions.RoomSendError: unknown error" in body
+    assert 'File "/app/nio/client.py", line 812, in room\\_send' in body
