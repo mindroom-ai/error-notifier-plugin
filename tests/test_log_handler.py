@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 from conftest import remove_installed_handlers
-from error_notifier_test_import.log_handler import HANDLER_NAME, install_error_log_handler
+from error_notifier_test_import.formatter import _MAX_SUMMARY_CHARS, format_alert
+from error_notifier_test_import.log_handler import (
+    _MAX_EXCEPTION_CHARS,
+    HANDLER_NAME,
+    _truncate,
+    install_error_log_handler,
+    observed_error_from_record,
+)
 from error_notifier_test_import.models import ObservedError
 from mindroom.logging_config import setup_logging
 from mindroom.plugin_api import RuntimePaths, get_logger
@@ -77,3 +84,52 @@ def test_reinstalling_replaces_the_previous_handler(received: list[ObservedError
     assert sum(handler.get_name() == HANDLER_NAME for handler in logging.getLogger().handlers) == 1
     assert received == []
     assert len(later) == 1
+
+
+def test_truncate_keeps_head_and_tail_within_cap() -> None:
+    exact = "x" * _MAX_EXCEPTION_CHARS
+    assert _truncate(exact) == exact
+
+    head = 'Traceback (most recent call last):\n  File "/app/top.py", line 1, in entry\n    run()\n'
+    middle = '  File "/app/deep.py", line 10, in step\n    await next_step()\n' * 200
+    tail = (
+        '  File "/app/nio/client.py", line 812, in room_send\n'
+        "    raise RoomSendError()\n"
+        "nio.exceptions.RoomSendError: unknown error\n"
+    )
+    truncated = _truncate(head + middle + tail)
+
+    assert len(truncated) == _MAX_EXCEPTION_CHARS
+    assert truncated.startswith(head)
+    assert "\n…\n" in truncated
+    assert truncated.endswith(tail)
+
+
+def test_long_exception_summarized_before_truncation(received: list[ObservedError]) -> None:
+    def _raise_bad_gateway() -> None:
+        raise RuntimeError(f"Bad gateway (502): {'upstream body; ' * 650}")
+
+    try:
+        _raise_bad_gateway()
+    except RuntimeError:
+        get_logger("mindroom.matrix.client_delivery").exception("matrix_message_send_failed")
+
+    [exc_record] = received
+    assert exc_record.exception is not None and len(exc_record.exception) == _MAX_EXCEPTION_CHARS
+    assert exc_record.exception_summary is not None and len(exc_record.exception_summary) <= _MAX_SUMMARY_CHARS
+    body = format_alert(exc_record, None)
+    assert "RuntimeError: Bad gateway \\(502\\):" in body
+    assert "…\n" in body
+    assert "in \\_raise\\_bad\\_gateway" in body
+
+    preformatted = (
+        'Traceback (most recent call last):\n  File "/app/client.py", line 9, in send\n'
+        f"    raise ValueError()\nValueError: {'Y' * 12000}\n"
+    )
+    raw = logging.LogRecord(
+        "mindroom.ai", logging.ERROR, __file__, 1, {"event": "x", "exception": preformatted}, (), None
+    )
+    observed = observed_error_from_record(raw)
+    assert observed.exception_summary is not None and len(observed.exception_summary) <= _MAX_SUMMARY_CHARS
+    assert "error:  ValueError: YYY" in format_alert(observed, None)
+    assert 'File "/app/client.py", line 9, in send' in format_alert(observed, None)

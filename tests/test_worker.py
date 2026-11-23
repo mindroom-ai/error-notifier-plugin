@@ -12,7 +12,12 @@ from conftest import FakeHookContext, FakeMatrixAdmin, remove_installed_handlers
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import install_error_log_handler
 from error_notifier_test_import.models import NotifierSettings, ObservedError
-from error_notifier_test_import.worker import ErrorNotifierWorker, WorkerDeps, resolve_ops_room
+from error_notifier_test_import.worker import (
+    _SEND_RETRY_BACKOFF_SECONDS,
+    ErrorNotifierWorker,
+    WorkerDeps,
+    resolve_ops_room,
+)
 
 
 class Clock:
@@ -147,11 +152,69 @@ async def test_non_matching_record_is_ignored() -> None:
 async def test_sender_returns_none_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     ctx = _ctx()
     ctx.send_result = None
-    worker = ErrorNotifierWorker(ctx, NotifierSettings(extra_events=("test_burst_error",)))
+    sleeps: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(extra_events=("test_burst_error",)),
+        deps=WorkerDeps(sleep=_sleep),
+    )
 
     await worker._handle_record(_record())
+    await worker.wait_closed()
 
+    assert sleeps == [_SEND_RETRY_BACKOFF_SECONDS]
+    assert len(ctx.sent) == 2
     assert "send returned no event id" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sender_returns_none_retries_once_without_blocking_other_alerts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    retry_sleeping = asyncio.Event()
+    release_retry = asyncio.Event()
+    ctx = _ctx()
+    ctx.send_result = None
+
+    async def _sleep(seconds: float) -> None:
+        assert seconds == _SEND_RETRY_BACKOFF_SECONDS
+        retry_sleeping.set()
+        await release_retry.wait()
+
+    async def _recover_after_first(_room_id: str) -> None:
+        if ctx.sent:
+            ctx.send_result = "$event"
+
+    ctx.on_send = _recover_after_first
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(extra_events=("first_blip", "second_alert")),
+        deps=WorkerDeps(sleep=_sleep),
+    )
+    worker.start()
+    try:
+        worker.submit(_record(event="first_blip"))
+        await asyncio.wait_for(retry_sleeping.wait(), timeout=1)
+        assert len(ctx.sent) == 1
+
+        worker.submit(_record(event="second_alert"))
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+        assert len(ctx.sent) == 2
+        assert "second_alert" in ctx.sent[1]["text"]
+
+        release_retry.set()
+        await asyncio.wait_for(asyncio.gather(*list(worker_module._retry_tasks)), timeout=1)
+        assert len(ctx.sent) == 3
+        assert "first_blip" in ctx.sent[2]["text"]
+        assert "send returned no event id" not in caplog.text
+    finally:
+        release_retry.set()
+        worker.cancel()
+        await worker.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -391,6 +454,48 @@ async def test_concurrent_task_error_during_send_is_still_received() -> None:
         assert len(ctx.sent) == 2
     finally:
         release_send.set()
+        worker.cancel()
+        await worker.wait_closed()
+        remove_installed_handlers()
+
+
+@pytest.mark.asyncio
+async def test_errors_logged_during_retry_send_are_dropped() -> None:
+    send_calls = 0
+
+    async def _log_every_send(room_id: str) -> None:
+        nonlocal send_calls
+        send_calls += 1
+        logging.getLogger("mindroom.matrix.client_delivery").error(
+            {"event": "matrix_message_send_failed", "room_id": room_id, "error": "502 Bad Gateway"},
+        )
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    ctx = FakeHookContext(
+        matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops:localhost"}),
+        send_result=None,
+        on_send=_log_every_send,
+    )
+    received: list[ObservedError] = []
+    worker = ErrorNotifierWorker(ctx, NotifierSettings(), deps=WorkerDeps(sleep=_no_sleep))
+
+    def _on_error(record: ObservedError) -> None:
+        received.append(record)
+        worker.submit(record)
+
+    install_error_log_handler(_on_error)
+    worker.start()
+    try:
+        logging.getLogger("mindroom.orchestrator").error({"event": "config_update_failed", "error": "boom"})
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+        await asyncio.wait_for(asyncio.gather(*list(worker_module._retry_tasks)), timeout=1)
+
+        assert send_calls == 2
+        assert len(ctx.sent) == 2
+        assert [record.event for record in received] == ["config_update_failed"]
+    finally:
         worker.cancel()
         await worker.wait_closed()
         remove_installed_handlers()

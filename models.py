@@ -30,6 +30,7 @@ class ObservedError:
     timestamp: str | None
     event_dict: dict[str, Any] = field(default_factory=dict)
     exception: str | None = None
+    exception_summary: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:

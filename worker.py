@@ -16,6 +16,7 @@ from .rate_limit import DecisionKind, RateLimiter
 from .rules import action_for, matches
 
 QUEUE_MAX_SIZE = 1000
+_SEND_RETRY_BACKOFF_SECONDS = 4.0
 _WARNING_LOGGER = logging.getLogger("mindroom.plugins.error_notifier.worker")
 
 
@@ -124,18 +125,19 @@ class ErrorNotifierWorker:
         return True
 
     def cancel(self) -> None:
-        """Cancel the worker task when running."""
+        """Cancel the worker task and pending retries when running."""
         if self._task is not None and not self._task.done():
             self._task.cancel()
+        for task in list(_retry_tasks):
+            task.cancel()
 
     async def wait_closed(self) -> None:
-        """Wait for worker cancellation to finish."""
-        if self._task is None:
-            return
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            return
+        """Wait for worker and retry tasks to finish."""
+        for task in [t for t in (self._task, *list(_retry_tasks)) if t is not None]:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _run(self) -> None:
         while True:
@@ -176,6 +178,18 @@ class ErrorNotifierWorker:
         room = await self._resolve_ops_room()
         if room is None:
             return
+        if not await self._attempt_send(room, body, extra_content):
+            task = asyncio.create_task(self._retry_send(room, body, extra_content), name="error-notifier-retry")
+            _retry_tasks.add(task)
+            task.add_done_callback(_retry_tasks.discard)
+
+    async def _retry_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> None:
+        await self._deps.sleep(_SEND_RETRY_BACKOFF_SECONDS)
+        if not await self._attempt_send(room, body, extra_content):
+            _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
+
+    async def _attempt_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> bool:
+        """Send one message; return True if delivered or handled on error, False when no event id was returned."""
         try:
             token = self._sending.set(True)
             try:
@@ -192,9 +206,8 @@ class ErrorNotifierWorker:
                 "error-notifier failed to send alert",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-            return
-        if event_id is None:
-            _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
+            return True
+        return event_id is not None
 
     async def _resolve_ops_room(self) -> ResolvedOpsRoom | None:
         if self._resolved_room is not None:
@@ -222,6 +235,7 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
 
 _worker: ErrorNotifierWorker | None = None
 _worker_task: asyncio.Task[None] | None = None
+_retry_tasks: set[asyncio.Task[None]] = set()
 
 
 def start_worker(

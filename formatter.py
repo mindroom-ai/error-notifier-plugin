@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from mindroom.matrix.message_extras import (
@@ -11,6 +12,18 @@ from mindroom.matrix.message_extras import (
 )
 
 from .models import ObservedError
+
+_FRAME_RE = re.compile(r'^\s*(File "[^"]+", line \d+(?:, in .+)?)$')
+_GUTTER_RE = re.compile(r"^(?:[ ]+\|)+(?: |$)")
+_BORDER_CHARS = frozenset(" +-0123456789")
+_CHAIN_MARKERS = (
+    "Traceback (most recent call last):",
+    "+ Exception Group Traceback (most recent call last):",
+    "Exception Group Traceback (most recent call last):",
+    "During handling of the above exception,",
+    "The above exception was the direct cause",
+)
+_MAX_SUMMARY_CHARS = 300
 
 
 def format_alert(record: ObservedError, action: str | None) -> str:
@@ -67,11 +80,42 @@ def _display_error(record: ObservedError) -> str | None:
     error = record.event_dict.get("error")
     if error is not None:
         return _escape_markdown_text(str(error))
-    if record.exception:
-        lines = record.exception.splitlines()
-        if lines:
-            return _escape_markdown_text(lines[0])
+    if record.exception_summary:
+        return _escape_markdown_text(record.exception_summary)
     return None
+
+
+def _is_border(line: str) -> bool:
+    stripped = line.lstrip(" |").rstrip()
+    return stripped.startswith("+-") and "---" in stripped and set(stripped) <= _BORDER_CHARS
+
+
+def traceback_summary(exception: str) -> str | None:
+    """Return a short summary (final exception line and raising frame) of a traceback."""
+    lines = [
+        cleaned
+        for raw in exception.splitlines()
+        if (cleaned := _GUTTER_RE.sub("", raw)).strip() and not _is_border(raw)
+    ]
+    if not lines:
+        return None
+    start = max((i + 1 for i, line in enumerate(lines) if line.strip().startswith(_CHAIN_MARKERS)), default=0)
+    section = lines[start:] or lines
+    frames = [(i, match.group(1)) for i, line in enumerate(section) if (match := _FRAME_RE.match(line))]
+    if not frames:
+        return _cap(section[0].strip(), _MAX_SUMMARY_CHARS)
+    frame_idx, frame = frames[-1]
+    exc_line = next((line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace()), None)
+    if not exc_line:
+        return _cap(frame, _MAX_SUMMARY_CHARS)
+    budget = _MAX_SUMMARY_CHARS - len(frame) - 1
+    if budget >= 40:
+        return f"{_cap(exc_line, budget)}\n{frame}"
+    return _cap(f"{exc_line}\n{frame}", _MAX_SUMMARY_CHARS)
+
+
+def _cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
 def _format_error_lines(error_text: str) -> list[str]:
