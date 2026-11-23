@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from conftest import remove_installed_handlers
-from error_notifier_test_import.formatter import format_alert
+from error_notifier_test_import.formatter import _MAX_SUMMARY_CHARS, format_alert
 from error_notifier_test_import.log_handler import (
     _MAX_EXCEPTION_CHARS,
     HANDLER_NAME,
@@ -104,48 +104,32 @@ def test_truncate_keeps_head_and_tail_within_cap() -> None:
     assert "\n…\n" in truncated
     assert truncated.endswith(tail)
 
-    raw_record = logging.LogRecord(
-        name="mindroom.matrix.client_delivery",
-        level=logging.ERROR,
-        pathname=__file__,
-        lineno=1,
-        msg={"event": "matrix_message_send_failed", "exception": head + middle + tail},
-        args=(),
-        exc_info=None,
-    )
-    observed = observed_error_from_record(raw_record)
-    assert observed.exception == truncated
-    body = format_alert(observed, None)
-    assert "error:  nio.exceptions.RoomSendError: unknown error" in body
-    assert 'File "/app/nio/client.py", line 812, in room\\_send' in body
 
-
-def test_long_exception_message_preserves_type_and_frame_in_alert(received: list[ObservedError]) -> None:
+def test_long_exception_summarized_before_truncation(received: list[ObservedError]) -> None:
     def _raise_bad_gateway() -> None:
         raise RuntimeError(f"Bad gateway (502): {'upstream body; ' * 650}")
-
-    def _raise_huge_value() -> None:
-        raise ValueError("Y" * 12000)
 
     try:
         _raise_bad_gateway()
     except RuntimeError:
         get_logger("mindroom.matrix.client_delivery").exception("matrix_message_send_failed")
 
-    try:
-        _raise_huge_value()
-    except ValueError:
-        get_logger("mindroom.ai").exception("streaming_failed")
+    [exc_record] = received
+    assert exc_record.exception is not None and len(exc_record.exception) == _MAX_EXCEPTION_CHARS
+    assert exc_record.exception_summary is not None and len(exc_record.exception_summary) <= _MAX_SUMMARY_CHARS
+    body = format_alert(exc_record, None)
+    assert "RuntimeError: Bad gateway \\(502\\):" in body
+    assert "…\n" in body
+    assert "in \\_raise\\_bad\\_gateway" in body
 
-    first, second = received
-    assert first.exception is not None and len(first.exception) == _MAX_EXCEPTION_CHARS
-    first_body = format_alert(first, None)
-    assert "RuntimeError" in first_body
-    assert "502" in first_body
-    assert "in \\_raise\\_bad\\_gateway" in first_body
-
-    assert second.exception is not None and len(second.exception) == _MAX_EXCEPTION_CHARS
-    second_body = format_alert(second, None)
-    assert "error:  ValueError: YYY" in second_body
-    assert "…\n" in second_body
-    assert "in \\_raise\\_huge\\_value" in second_body
+    preformatted = (
+        'Traceback (most recent call last):\n  File "/app/client.py", line 9, in send\n'
+        f"    raise ValueError()\nValueError: {'Y' * 12000}\n"
+    )
+    raw = logging.LogRecord(
+        "mindroom.ai", logging.ERROR, __file__, 1, {"event": "x", "exception": preformatted}, (), None
+    )
+    observed = observed_error_from_record(raw)
+    assert observed.exception_summary is not None and len(observed.exception_summary) <= _MAX_SUMMARY_CHARS
+    assert "error:  ValueError: YYY" in format_alert(observed, None)
+    assert 'File "/app/client.py", line 9, in send' in format_alert(observed, None)

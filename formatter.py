@@ -80,8 +80,9 @@ def _display_error(record: ObservedError) -> str | None:
     error = record.event_dict.get("error")
     if error is not None:
         return _escape_markdown_text(str(error))
-    summary = record.exception_summary or (traceback_summary(record.exception) if record.exception else None)
-    return _escape_markdown_text(summary) if summary else None
+    if record.exception_summary:
+        return _escape_markdown_text(record.exception_summary)
+    return None
 
 
 def _is_border(line: str) -> bool:
