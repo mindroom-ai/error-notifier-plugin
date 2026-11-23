@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import traceback
 
 import pytest
@@ -191,3 +192,29 @@ def test_long_traceback_summary_is_capped() -> None:
     assert summary_len <= _MAX_SUMMARY_CHARS
     assert "…\n" in body
     assert 'File "/app/client.py", line 12, in send' in body
+
+
+def test_pathological_divider_line_formats_quickly() -> None:
+    tb = f"+{'-' * 8192}x\nRuntimeError: boom\n"
+    start = time.perf_counter()
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.05
+    assert "error:" in body
+
+
+def test_truncated_exception_without_tail_frame_never_uses_head_frame() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/head_only.py", line 1, in outer_entry\n'
+        "    run()\n"
+        "\n…\n"
+        "mid-word fragment of huge payload\n"
+        "final tail detail\n"
+    )
+    body = format_alert(_record(event_dict={}, exception=tb), None)
+
+    assert "error:  final tail detail" in body
+    assert "head\\_only.py" not in body
+    assert "mid-word fragment" not in body

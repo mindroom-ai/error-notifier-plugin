@@ -68,7 +68,6 @@ class ErrorNotifierWorker:
         self._queue: asyncio.Queue[ObservedError] = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
         self._rate_limiter = RateLimiter(settings.rate_limit_seconds, clock=self._deps.clock or time.monotonic)
         self._task: asyncio.Task[None] | None = None
-        self._retry_tasks: set[asyncio.Task[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._resolved_room: ResolvedOpsRoom | None = None
         self._resolution_attempted = False
@@ -130,33 +129,29 @@ class ErrorNotifierWorker:
         """Cancel the worker task and pending retries when running."""
         if self._task is not None and not self._task.done():
             self._task.cancel()
-        for task in list(self._retry_tasks):
+        for task in list(_retry_tasks):
             task.cancel()
 
     async def wait_closed(self) -> None:
         """Wait for worker and retry tasks to finish."""
-        for task in [t for t in (self._task, *list(self._retry_tasks)) if t is not None]:
+        for task in [t for t in (self._task, *list(_retry_tasks)) if t is not None]:
             try:
                 await task
             except asyncio.CancelledError:
                 pass
 
     async def _run(self) -> None:
-        try:
-            while True:
-                try:
-                    record = await asyncio.wait_for(self._queue.get(), timeout=self._sweep_interval())
-                except TimeoutError:
-                    await self._emit_sweep_summaries()
-                    continue
+        while True:
+            try:
+                record = await asyncio.wait_for(self._queue.get(), timeout=self._sweep_interval())
+            except TimeoutError:
+                await self._emit_sweep_summaries()
+                continue
 
-                try:
-                    await self._handle_record(record)
-                finally:
-                    self._queue.task_done()
-        finally:
-            for task in list(self._retry_tasks):
-                task.cancel()
+            try:
+                await self._handle_record(record)
+            finally:
+                self._queue.task_done()
 
     def _sweep_interval(self) -> float:
         return min(60.0, max(1.0, self._settings.rate_limit_seconds / 4))
@@ -186,17 +181,8 @@ class ErrorNotifierWorker:
             return
         if await self._attempt_send(room, body, extra_content) is None:
             task = asyncio.create_task(self._retry_send(room, body, extra_content), name="error-notifier-retry")
-            self._track_retry_task(task)
-
-    def _track_retry_task(self, task: asyncio.Task[None]) -> None:
-        self._retry_tasks.add(task)
-        _retry_tasks.add(task)
-
-        def _discard(done: asyncio.Task[None]) -> None:
-            self._retry_tasks.discard(done)
-            _retry_tasks.discard(done)
-
-        task.add_done_callback(_discard)
+            _retry_tasks.add(task)
+            task.add_done_callback(_retry_tasks.discard)
 
     async def _retry_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> None:
         await self._deps.sleep(_SEND_RETRY_BACKOFF_SECONDS)
@@ -204,6 +190,7 @@ class ErrorNotifierWorker:
             _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
 
     async def _attempt_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> object:
+        """Send one message, returning its event id, None when none was returned, or _SEND_EXCEPTION on error."""
         try:
             token = self._sending.set(True)
             try:

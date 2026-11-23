@@ -13,9 +13,9 @@ from mindroom.matrix.message_extras import (
 
 from .models import ObservedError
 
-_FRAME_RE = re.compile(r'^\s*(File ".+", line \d+(?:, in .+)?)$')
+_FRAME_RE = re.compile(r'^\s*(File "[^"]+", line \d+(?:, in .+)?)$')
 _GUTTER_RE = re.compile(r"^(?:[ ]+\|)+(?: |$)")
-_BORDER_RE = re.compile(r"^[ |+-]*-{3,}(?:\s+\d+\s+-{3,})?[ |+-]*$")
+_BORDER_CHARS = frozenset(" +-0123456789")
 _CHAIN_MARKERS = (
     "Traceback (most recent call last):",
     "+ Exception Group Traceback (most recent call last):",
@@ -87,24 +87,30 @@ def _display_error(record: ObservedError) -> str | None:
     return None
 
 
+def _is_border(line: str) -> bool:
+    stripped = line.lstrip(" |").rstrip()
+    return stripped.startswith("+-") and "---" in stripped and set(stripped) <= _BORDER_CHARS
+
+
 def _traceback_summary(exception: str) -> str | None:
+    truncated = "\n…\n" in exception
+    if truncated:
+        exception = exception.rsplit("\n…\n", maxsplit=1)[1]
     lines = [
         cleaned
         for raw in exception.splitlines()
-        if (cleaned := _GUTTER_RE.sub("", raw)).strip() and not _BORDER_RE.match(raw)
+        if (cleaned := _GUTTER_RE.sub("", raw)).strip() and not _is_border(raw)
     ]
     if not lines:
-        return None
+        return "…" if truncated else None
     start = max((i + 1 for i, line in enumerate(lines) if line.strip().startswith(_CHAIN_MARKERS)), default=0)
     section = lines[start:] or lines
     frames = [(i, match.group(1)) for i, line in enumerate(section) if (match := _FRAME_RE.match(line))]
     if not frames:
-        return _cap(section[0].strip(), _MAX_SUMMARY_CHARS)
+        line = section[-1] if truncated else section[0]
+        return _cap(line.strip(), _MAX_SUMMARY_CHARS)
     frame_idx, frame = frames[-1]
-    exc_line = next(
-        (line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace() and line.strip() != "…"),
-        None,
-    )
+    exc_line = next((line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace()), None)
     if not exc_line:
         return _cap(frame, _MAX_SUMMARY_CHARS)
     budget = _MAX_SUMMARY_CHARS - len(frame) - 1

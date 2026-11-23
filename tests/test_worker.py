@@ -207,7 +207,7 @@ async def test_sender_returns_none_retries_once_without_blocking_other_alerts(
         assert "second_alert" in ctx.sent[1]["text"]
 
         release_retry.set()
-        await asyncio.wait_for(asyncio.gather(*list(worker._retry_tasks)), timeout=1)
+        await asyncio.wait_for(asyncio.gather(*list(worker_module._retry_tasks)), timeout=1)
         assert len(ctx.sent) == 3
         assert "first_blip" in ctx.sent[2]["text"]
         assert "send returned no event id" not in caplog.text
@@ -490,7 +490,7 @@ async def test_errors_logged_during_retry_send_are_dropped() -> None:
     try:
         logging.getLogger("mindroom.orchestrator").error({"event": "config_update_failed", "error": "boom"})
         await asyncio.wait_for(worker.queue.join(), timeout=1)
-        await asyncio.wait_for(asyncio.gather(*list(worker._retry_tasks)), timeout=1)
+        await asyncio.wait_for(asyncio.gather(*list(worker_module._retry_tasks)), timeout=1)
 
         assert send_calls == 2
         assert len(ctx.sent) == 2

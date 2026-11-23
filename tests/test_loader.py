@@ -144,6 +144,7 @@ async def test_hot_reload_cancels_pending_retry_tasks() -> None:
         await asyncio.wait_for(retry_sleeping.wait(), timeout=1)
         [retry_task] = list(worker_module._retry_tasks)
 
+        # MindRoom invokes _cancel_module_tasks on replaced plugin modules during hot reload.
         _cancel_module_tasks((worker_module,))
         release_retry.set()
         await worker.wait_closed()
