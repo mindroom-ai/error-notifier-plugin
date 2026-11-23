@@ -1,6 +1,7 @@
 # Error Notifier
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/mindroom-ai/error-notifier-plugin/actions/workflows/plugin-ci.yml/badge.svg)](https://github.com/mindroom-ai/error-notifier-plugin/actions/workflows/plugin-ci.yml)
 [![Docs](https://img.shields.io/badge/docs-plugins-blue)](https://docs.mindroom.chat/plugins/)
 [![Hooks](https://img.shields.io/badge/docs-hooks-blue)](https://docs.mindroom.chat/hooks/)
 
@@ -73,9 +74,7 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
 5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
 
-Restart MindRoom to apply changed plugin settings.
-
-If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert; it does not apply changed settings. Tracebacks are never inlined in the alert body.
+If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert, but applying changed plugin settings requires restarting MindRoom. Tracebacks are never inlined in the alert body.
 
 </details>
 
@@ -85,7 +84,7 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts. A 
 - It sees only errors MindRoom logs; a crash that kills the process before logging sends nothing.
 - Alerts go to a room that a running MindRoom bot can post in.
 - If the homeserver returns no event id, an alert may be retried once after a short delay (a rare duplicate is possible).
-- `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (hooks, redaction, message extras); re-run it after each upgrade.
+- `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (redaction, message extras); re-run it after each upgrade.
 
 </details>
 
