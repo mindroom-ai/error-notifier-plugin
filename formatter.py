@@ -24,10 +24,13 @@ def format_alert(
     action: str | None,
     *,
     previous_thread: tuple[str, str] | None = None,
+    recent_occurrences: int | None = None,
 ) -> str:
     """Format one top-level root alert body."""
     component, headline = _title_parts(record)
     lines = [f"🚨 {component}: {headline}", f"time:    {timestamp_for(record)}", *_detail_lines(record, action)]
+    if recent_occurrences is not None and recent_occurrences > 1:
+        lines.append(f"occurrences: {recent_occurrences} in last window")
     if previous_thread is not None:
         room_id, prev_thread_id = previous_thread
         url = f"https://matrix.to/#/{quote(room_id, safe='')}/{quote(prev_thread_id, safe='')}"

@@ -28,6 +28,17 @@ _MAX_EXCEPTION_CHARS = 8192
 _TRUNCATION_HEAD_CHARS = 2048
 _TRUNCATION_MARKER = "\n…\n"
 _SENDING_ALERT: ContextVar[bool] = ContextVar("mindroom_error_notifier_sending", default=False)
+_STDLIB_EXTRA_KEYS = (
+    "plugin_name",
+    "hook_name",
+    "tool_name",
+    "tool",
+    "provider",
+    "agent",
+    "correlation_id",
+    "error_type",
+    "exception_type",
+)
 
 _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 
@@ -99,6 +110,9 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         if record.args:
             event_dict["error"] = record.getMessage()
             error_from_args = True
+        for extra_key in _STDLIB_EXTRA_KEYS:
+            if (extra_val := record.__dict__.get(extra_key)) is not None:
+                event_dict.setdefault(extra_key, extra_val)
         exc_info = record.exc_info
     event_dict.setdefault("logger", record.name)
     event_dict.setdefault("level", record.levelname.lower())

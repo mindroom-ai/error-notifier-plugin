@@ -56,6 +56,9 @@ def test_alert_body_with_subkey_context_error_type_and_percent_encoded_reoccurre
             "error": "TimeoutError: timed out after 15s",
         },
     )
+    body = format_alert(record, None, previous_thread=("!ops:localhost", "$prev1"), recent_occurrences=5)
+    assert "\noccurrences: 5 in last window\n" in body
+    assert "\noccurrences:" not in format_alert(record, None, recent_occurrences=1)
     body = format_alert(record, None, previous_thread=("!ops:localhost", "$prev1"))
 
     assert body == (
@@ -318,6 +321,11 @@ def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
         "ProviderUnavailable"
     )
     assert _record(event_dict={"error": "httpx.ReadTimeout: slow"}).fingerprint.error_type == "httpx.ReadTimeout"
+    timeout_fp = _record(event_dict={"error": "TimeoutError: slow"}).fingerprint
+    value_fp = _record(event_dict={"error": "ValueError: bad"}).fingerprint
+    assert timeout_fp.error_type == "TimeoutError"
+    assert value_fp.error_type == "ValueError"
+    assert timeout_fp != value_fp
     assert _record(event_dict={"error": "ProviderUnavailable('x')"}, error_from_args=True).fingerprint.error_type == ""
 
     # Never leaks bare words + colon, raw messages, URLs, timestamps, or all-caps prefixes into error_type.

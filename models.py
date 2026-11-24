@@ -21,10 +21,11 @@ _CHAIN_MARKERS = (
     "The above exception was the direct cause",
 )
 _CLASS_SEG = r"[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*"
+_EXC_SUFFIX_CLASS = r"[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning|Timeout)"
 _TRACEBACK_CLASS_RE = re.compile(rf"^((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\(|:(?!//)|\Z)")
 _ERROR_TEXT_CLASS_RE = re.compile(
     rf"^(?:((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\()"
-    rf"|((?:[A-Za-z_][A-Za-z0-9_]*\.)+{_CLASS_SEG})(?=:(?!//)|\Z))"
+    rf"|((?:[A-Za-z_][A-Za-z0-9_]*\.)+{_CLASS_SEG}|{_EXC_SUFFIX_CLASS})(?=:(?!//)|\Z))"
 )
 
 

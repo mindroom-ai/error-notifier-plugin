@@ -147,3 +147,20 @@ def test_stdlib_percent_args_do_not_leak_into_error_type(received: list[Observed
     assert first.fingerprint.error_type == ""
     assert not third.error_from_args
     assert third.fingerprint.error_type == "ProviderUnavailable"
+
+
+def test_stdlib_extra_fields_are_forwarded_and_redacted(received: list[ObservedError]) -> None:
+    log = logging.getLogger("livekit.agents")
+    log.error(
+        "room join failed: %s",
+        "WorkerA",
+        extra={"correlation_id": "turn-42", "provider": "livekit", "agent": "voice"},
+    )
+
+    [record] = received
+    assert record.event == "room join failed: %s"
+    assert record.error_from_args
+    assert record.event_dict["correlation_id"] == "turn-42"
+    assert record.event_dict["agent"] == "voice"
+    assert record.fingerprint.subkey == "provider=livekit"
+    assert record.fingerprint.error_type == ""

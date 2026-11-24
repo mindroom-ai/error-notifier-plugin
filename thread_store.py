@@ -86,16 +86,6 @@ class ThreadStore:
         self._save()
         return entry
 
-    def forget(self, room_id: str, fingerprint: ErrorFingerprint) -> OpenThread | None:
-        """Remove a tracked thread for `(room_id, fingerprint)` and persist if changed."""
-        room_map = self._rooms.get(room_id)
-        if not room_map or (removed := room_map.pop(fingerprint.canonical(), None)) is None:
-            return None
-        if not room_map:
-            self._rooms.pop(room_id, None)
-        self._save()
-        return removed
-
     def record_correlation(
         self, room_id: str, corr_id: str | None, thread_id: str, primary_fingerprint: ErrorFingerprint
     ) -> None:

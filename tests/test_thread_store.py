@@ -20,7 +20,7 @@ class Clock:
         return self.now
 
 
-def test_thread_store_persists_forgets_prunes_and_tolerates_corrupt_json(
+def test_thread_store_persists_replaces_prunes_and_tolerates_corrupt_json(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -42,9 +42,10 @@ def test_thread_store_persists_forgets_prunes_and_tolerates_corrupt_json(
     assert reloaded.get("!ops:localhost", fp2) is not None
     assert reloaded.get("!ops:localhost", fp3) is not None
 
-    # Forgetting removes entry from disk.
-    assert reloaded.forget("!ops:localhost", fp2) is not None
-    assert ThreadStore(tmp_path, max_per_room=2).get("!ops:localhost", fp2) is None
+    # Recording a new root replaces the previous thread id on disk.
+    reloaded.record("!ops:localhost", fp2, "$2-reopened", "err2b", "2026-05-20T04:00:00+00:00")
+    replaced = ThreadStore(tmp_path, max_per_room=2).get("!ops:localhost", fp2)
+    assert replaced is not None and replaced.thread_id == "$2-reopened"
 
     # Partially corrupt entries are skipped with warning while preserving valid ones.
     data = json.loads((tmp_path / "open_threads.json").read_text(encoding="utf-8"))

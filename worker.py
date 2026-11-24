@@ -232,6 +232,7 @@ class ErrorNotifierWorker:
         fp: ErrorFingerprint,
         *,
         previous_thread: tuple[str, str] | None = None,
+        recent_occurrences: int | None = None,
     ) -> None:
         last_error, seen_at = raw_error_text(record), timestamp_for(record)
         corr_id = non_empty_str(record.event_dict.get("correlation_id"))
@@ -244,7 +245,12 @@ class ErrorNotifierWorker:
             self._thread_store.record_correlation(room.room_id, corr_id, event_id, fp)
 
         await self._send_text(
-            format_alert(record, action_for(record), previous_thread=previous_thread),
+            format_alert(
+                record,
+                action_for(record),
+                previous_thread=previous_thread,
+                recent_occurrences=recent_occurrences,
+            ),
             extra_content_for(record, self._settings.include_stack_traces),
             room=room,
             on_delivered=_on_delivered,
@@ -285,6 +291,11 @@ class ErrorNotifierWorker:
             existing = self._thread_store.get(room.room_id, entry.key)
             if existing is None:
                 self._rate_limiter.reset(entry.key)
+                if entry.last_record is not None:
+                    self._rate_limiter.gate(entry.key, entry.last_record)
+                    await self._send_root_alert(
+                        room, entry.last_record, entry.key, recent_occurrences=entry.suppressed_count
+                    )
                 continue
             resolved, resolved_at = await self._resolved_at(room.room_id, existing.thread_id)
             if resolved:
@@ -294,7 +305,11 @@ class ErrorNotifierWorker:
                 if record is not None and (resolved_at is None or record_dt is None or record_dt > resolved_at):
                     self._rate_limiter.gate(entry.key, record)
                     await self._send_root_alert(
-                        room, record, entry.key, previous_thread=(room.room_id, existing.thread_id)
+                        room,
+                        record,
+                        entry.key,
+                        previous_thread=(room.room_id, existing.thread_id),
+                        recent_occurrences=entry.suppressed_count,
                     )
                 continue
             await self._send_followup(
