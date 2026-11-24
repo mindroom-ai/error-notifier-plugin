@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable
@@ -59,10 +60,45 @@ class FakeHookContext:
     matrix_user_id: str = "@mindroom_router:localhost"
     event_name: str = "bot:ready"
     settings: dict[str, Any] = field(default_factory=dict)
+    state_root: Path | None = None
     sent: list[dict[str, Any]] = field(default_factory=list)
     send_result: str | None = "$event"
     send_raises: BaseException | None = None
     on_send: Callable[[str], Awaitable[None]] | None = None
+    room_state: dict[tuple[str, str, str | None], dict[str, Any] | None] = field(default_factory=dict)
+    state_queries: list[tuple[str, str, str | None]] = field(default_factory=list)
+    query_state_raises: BaseException | None = None
+    on_query_state: Callable[[str, str, str | None], Awaitable[None]] | None = None
+
+    def set_thread_resolved(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        resolved: bool = True,
+        cleared: bool = False,
+    ) -> None:
+        state_key = json.dumps([thread_id, "resolved"], separators=(",", ":"))
+        key = (room_id, "com.mindroom.thread.tags", state_key)
+        if cleared:
+            self.room_state[key] = {}
+        elif resolved:
+            self.room_state[key] = {"tagged_by": "@ops:localhost", "tagged_at": "2026-05-20T21:30:00+00:00"}
+        else:
+            self.room_state.pop(key, None)
+
+    async def query_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        self.state_queries.append((room_id, event_type, state_key))
+        if self.on_query_state is not None:
+            await self.on_query_state(room_id, event_type, state_key)
+        if self.query_state_raises is not None:
+            raise self.query_state_raises
+        return self.room_state.get((room_id, event_type, state_key))
 
     async def send_message(
         self,
@@ -86,4 +122,6 @@ class FakeHookContext:
                 "extra_content": extra_content,
             },
         )
+        if self.send_result == "$event":
+            return f"$event-{len(self.sent)}"
         return self.send_result

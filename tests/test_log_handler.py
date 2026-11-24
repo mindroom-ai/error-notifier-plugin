@@ -131,5 +131,5 @@ def test_long_exception_summarized_before_truncation(received: list[ObservedErro
     )
     observed = observed_error_from_record(raw)
     assert observed.exception_summary is not None and len(observed.exception_summary) <= _MAX_SUMMARY_CHARS
-    assert "error:  ValueError: YYY" in format_alert(observed, None)
+    assert "error:   ValueError: YYY" in format_alert(observed, None)
     assert 'File "/app/client.py", line 9, in send' in format_alert(observed, None)
