@@ -54,6 +54,7 @@ class ThreadStore:
         self._clock = clock
         self._rooms: dict[str, dict[str, OpenThread]] = {}
         self._correlations: dict[tuple[str, str], CorrelationEntry] = {}
+        self._cascade_emits: dict[tuple[str, ErrorFingerprint], float] = {}
         if self._path is not None:
             self._load()
 
@@ -123,9 +124,31 @@ class ThreadStore:
         """Forget one correlation mapping."""
         self._correlations.pop((room_id, corr_id), None)
 
+    def is_cascade_throttled(self, thread_id: str, fingerprint: ErrorFingerprint, window_seconds: int) -> bool:
+        """Return whether a cascade reply for `(thread_id, fingerprint)` was already sent in this window."""
+        now = self._clock()
+        self._prune_cascade_emits(now, window_seconds)
+        last = self._cascade_emits.get((thread_id, fingerprint))
+        return last is not None and now - last < max(1, window_seconds)
+
+    def record_cascade_emit(self, thread_id: str, fingerprint: ErrorFingerprint, window_seconds: int) -> None:
+        """Record a cascade reply emission timestamp for `(thread_id, fingerprint)`."""
+        now = self._clock()
+        self._prune_cascade_emits(now, window_seconds)
+        key = (thread_id, fingerprint)
+        self._cascade_emits.pop(key, None)
+        self._cascade_emits[key] = now
+        while len(self._cascade_emits) > CORRELATION_MAX_ENTRIES:
+            self._cascade_emits.pop(next(iter(self._cascade_emits)))
+
     def _prune_correlations(self, now: float) -> None:
         for key in [k for k, e in self._correlations.items() if now - e.recorded_at >= CORRELATION_TTL_SECONDS]:
             self._correlations.pop(key, None)
+
+    def _prune_cascade_emits(self, now: float, window_seconds: int) -> None:
+        ttl = max(1, window_seconds)
+        for key in [k for k, ts in self._cascade_emits.items() if now - ts >= ttl]:
+            self._cascade_emits.pop(key, None)
 
     def _prune_room(self, room_map: dict[str, OpenThread]) -> None:
         excess = len(room_map) - self._max_per_room

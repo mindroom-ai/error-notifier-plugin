@@ -77,13 +77,17 @@ class FakeHookContext:
         *,
         resolved: bool = True,
         cleared: bool = False,
+        set_at: str | None = "2026-05-20T21:30:00+00:00",
     ) -> None:
         state_key = json.dumps([thread_id, "resolved"], separators=(",", ":"))
         key = (room_id, "com.mindroom.thread.tags", state_key)
         if cleared:
             self.room_state[key] = {}
         elif resolved:
-            self.room_state[key] = {"tagged_by": "@ops:localhost", "tagged_at": "2026-05-20T21:30:00+00:00"}
+            payload: dict[str, Any] = {"set_by": "@ops:localhost"}
+            if set_at is not None:
+                payload["set_at"] = set_at
+            self.room_state[key] = payload
         else:
             self.room_state.pop(key, None)
 

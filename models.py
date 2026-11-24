@@ -20,7 +20,12 @@ _CHAIN_MARKERS = (
     "During handling of the above exception,",
     "The above exception was the direct cause",
 )
-_CLASS_NAME_RE = re.compile(r"^((?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*)(?=\(|:(?!//)|\Z)")
+_CLASS_SEG = r"[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*"
+_TRACEBACK_CLASS_RE = re.compile(rf"^((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\(|:(?!//)|\Z)")
+_ERROR_TEXT_CLASS_RE = re.compile(
+    rf"^(?:((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\()"
+    rf"|((?:[A-Za-z_][A-Za-z0-9_]*\.)+{_CLASS_SEG})(?=:(?!//)|\Z))"
+)
 
 
 class ErrorFingerprint(NamedTuple):
@@ -59,16 +64,17 @@ class ObservedError:
     event_dict: dict[str, Any] = field(default_factory=dict)
     exception: str | None = None
     exception_summary: str | None = None
+    error_from_args: bool = False
+    _fingerprint: ErrorFingerprint = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        fp = ErrorFingerprint(self.logger, self.event, _extract_subkey(self.event_dict), _extract_error_type(self))
+        object.__setattr__(self, "_fingerprint", fp)
 
     @property
     def fingerprint(self) -> ErrorFingerprint:
         """Return the structured fingerprint for thread bundling and rate limiting."""
-        return ErrorFingerprint(self.logger, self.event, _extract_subkey(self.event_dict), _extract_error_type(self))
-
-    @property
-    def key(self) -> ErrorFingerprint:
-        """Return the structured rate-limit key."""
-        return self.fingerprint
+        return self._fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,16 +138,24 @@ def _extract_error_type(record: ObservedError) -> str:
         frames, exc_line, section = parse_traceback_tail(record.exception)
         candidates = [exc_line] if exc_line else ([] if frames else [line.strip() for line in section])
         for candidate in candidates:
-            if matched := _match_class_name(candidate):
+            if matched := _match_traceback_class(candidate):
                 return matched
     if record.exception_summary:
-        if matched := _match_class_name(record.exception_summary.splitlines()[0].strip()):
+        if matched := _match_traceback_class(record.exception_summary.splitlines()[0].strip()):
             return matched
-    if isinstance(error := record.event_dict.get("error"), str):
-        return _match_class_name(error.strip())
+    if not record.error_from_args and isinstance(error := record.event_dict.get("error"), str):
+        return _match_error_text_class(error.strip())
     return ""
 
 
-def _match_class_name(text: str) -> str:
-    match = _CLASS_NAME_RE.match(text)
+def _match_traceback_class(text: str) -> str:
+    match = _TRACEBACK_CLASS_RE.match(text)
     return "" if match is None or match.group(1) == "Traceback" else match.group(1)
+
+
+def _match_error_text_class(text: str) -> str:
+    match = _ERROR_TEXT_CLASS_RE.match(text)
+    if match is None:
+        return ""
+    candidate = match.group(1) or match.group(2)
+    return "" if candidate == "Traceback" else candidate

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from mindroom.matrix.message_extras import (
     MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS,
@@ -29,7 +30,8 @@ def format_alert(
     lines = [f"🚨 {component}: {headline}", f"time:    {timestamp_for(record)}", *_detail_lines(record, action)]
     if previous_thread is not None:
         room_id, prev_thread_id = previous_thread
-        lines.append(f"reoccurred: [previous resolved thread](https://matrix.to/#/{room_id}/{prev_thread_id})")
+        url = f"https://matrix.to/#/{quote(room_id, safe='')}/{quote(prev_thread_id, safe='')}"
+        lines.append(f"reoccurred: [previous resolved thread]({url})")
     return "\n".join(lines)
 
 
@@ -50,7 +52,7 @@ def format_thread_followup(
     lines = [header]
     new_error = raw_error_text(record) if record is not None else None
     if new_error and (not last_error or new_error != last_error):
-        lines.extend(_format_error_lines(new_error.translate(_MARKDOWN_ESCAPES)))
+        lines.extend(_format_error_lines(_escape_markdown(new_error)))
     return "\n".join(lines)
 
 
@@ -111,11 +113,18 @@ def _is_mindroom_frame(frame: str) -> bool:
     return "/mindroom/" in path or path.startswith("mindroom/")
 
 
+def _escape_markdown(text: str) -> str:
+    return text.translate(_MARKDOWN_ESCAPES)
+
+
 def _title_parts(record: ObservedError) -> tuple[str, str]:
     fp = record.fingerprint
-    subkey_display = ", ".join(part.split("=", 1)[-1] for part in fp.subkey.split(",")) if fp.subkey else ""
-    component = f"{record.logger} ({subkey_display})" if subkey_display else record.logger
-    return component, fp.error_type or record.event
+    subkey_display = (
+        ", ".join(_escape_markdown(part.split("=", 1)[-1]) for part in fp.subkey.split(",")) if fp.subkey else ""
+    )
+    logger_md = _escape_markdown(record.logger)
+    component = f"{logger_md} ({subkey_display})" if subkey_display else logger_md
+    return component, _escape_markdown(fp.error_type or record.event)
 
 
 def _detail_lines(record: ObservedError, action: str | None) -> list[str]:
@@ -123,7 +132,7 @@ def _detail_lines(record: ObservedError, action: str | None) -> list[str]:
     if context_line := _format_context(record):
         lines.append(f"context: {context_line}")
     if raw_error := raw_error_text(record):
-        lines.extend(_format_error_lines(raw_error.translate(_MARKDOWN_ESCAPES)))
+        lines.extend(_format_error_lines(_escape_markdown(raw_error)))
     if action:
         lines.append(f"action:  {action}")
     return lines
@@ -138,7 +147,7 @@ def _format_context(record: ObservedError) -> str:
         ("provider", non_empty_str(event_dict.get("provider"))),
         ("agent", non_empty_str(event_dict.get("agent"))),
     )
-    return " ".join(f"{label}={value}" for label, value in fields if value)
+    return " ".join(f"{label}={_escape_markdown(value)}" for label, value in fields if value)
 
 
 def _cap(text: str, limit: int) -> str:

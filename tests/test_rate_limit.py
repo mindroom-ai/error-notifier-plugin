@@ -36,23 +36,18 @@ def test_first_occurrence_emits_fresh() -> None:
     assert limiter.gate(_fp()).kind is DecisionKind.EMIT_FRESH
 
 
-def test_within_window_suppresses_and_tracks_latest_record() -> None:
+def test_within_window_suppresses_and_counts() -> None:
     clock = Clock()
     limiter: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock)
     limiter.gate(_fp(), _record(error="first"))
     clock.now = 2
-    second = _record(error="second")
-    decision1 = limiter.gate(_fp(), second)
+    decision1 = limiter.gate(_fp(), _record(error="second"))
     clock.now = 5
-    third = _record(error="third")
-    decision2 = limiter.gate(_fp(), third)
+    decision2 = limiter.gate(_fp(), _record(error="third"))
 
     assert decision1.kind is DecisionKind.SUPPRESS
     assert decision1.suppressed_count == 1
-    assert decision1.first_suppressed_ts == 2
     assert decision2.suppressed_count == 2
-    assert decision2.first_suppressed_ts == 2
-    assert decision2.last_record is third
 
 
 def test_window_expiry_with_prior_suppression_emits_resume() -> None:
@@ -62,14 +57,11 @@ def test_window_expiry_with_prior_suppression_emits_resume() -> None:
     clock.now = 3
     limiter.gate(_fp(), _record(error="suppressed"))
     clock.now = 10
-    resuming = _record(error="resuming")
 
-    decision = limiter.gate(_fp(), resuming)
+    decision = limiter.gate(_fp(), _record(error="resuming"))
 
     assert decision.kind is DecisionKind.EMIT_RESUME
     assert decision.suppressed_count == 1
-    assert decision.first_suppressed_ts == 3
-    assert decision.last_record is resuming
 
 
 def test_distinct_keys_are_independent() -> None:
@@ -88,7 +80,7 @@ def test_same_clock_value_does_not_crash() -> None:
     assert limiter.gate(_fp()).kind is DecisionKind.SUPPRESS
 
 
-def test_sweep_returns_expired_suppressed_entries_and_advances_backoff() -> None:
+def test_sweep_returns_expired_suppressed_entries_with_latest_record() -> None:
     clock = Clock()
     limiter: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock)
     latest = _record(error="latest")
@@ -97,7 +89,7 @@ def test_sweep_returns_expired_suppressed_entries_and_advances_backoff() -> None
     limiter.gate(_fp(), latest)
     clock.now = 10
 
-    assert limiter.sweep() == [SweepEntry(_fp(), 1, first_suppressed_ts=2, last_record=latest)]
+    assert limiter.sweep() == [SweepEntry(_fp(), 1, last_record=latest)]
     assert limiter.sweep() == []
 
 
@@ -111,21 +103,35 @@ def test_sweep_skips_entries_within_window() -> None:
     assert limiter.sweep() == []
 
 
-def test_sweep_prunes_expired_unsuppressed_entries_and_restarts_at_base() -> None:
-    clock = Clock()
-    limiter: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock)
-    limiter.gate(_fp())
-    limiter.gate(_fp())
-    clock.now = 10
-    assert len(limiter.sweep()) == 1  # now at step 1 (30s)
+def test_quiet_window_resets_backoff_with_or_without_intervening_sweep() -> None:
+    # With intervening sweep:
+    clock1 = Clock()
+    limiter1: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock1)
+    limiter1.gate(_fp())
+    limiter1.gate(_fp())
+    clock1.now = 10
+    assert len(limiter1.sweep()) == 1  # step 1 (30s)
+    clock1.now = 40
+    assert limiter1.sweep() == []  # quiet 30s window -> pruned
+    assert limiter1.gate(_fp()).kind is DecisionKind.EMIT_FRESH
+    limiter1.gate(_fp())
+    clock1.now = 50  # back at 10s base window
+    assert len(limiter1.sweep()) == 1
 
-    clock.now = 40
-    assert limiter.sweep() == []  # quiet 30s window -> pruned
-
-    assert limiter.gate(_fp()).kind is DecisionKind.EMIT_FRESH
-    limiter.gate(_fp())
-    clock.now = 50  # back to 10s base window, not 30s
-    assert len(limiter.sweep()) == 1
+    # Without any intervening sweep:
+    clock2 = Clock()
+    limiter2: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock2)
+    limiter2.gate(_fp())
+    limiter2.gate(_fp())
+    clock2.now = 10
+    assert limiter2.gate(_fp()).kind is DecisionKind.EMIT_RESUME  # step 1 (30s)
+    clock2.now = 40  # quiet 30s window, no sweep called!
+    assert limiter2.gate(_fp()).kind is DecisionKind.EMIT_FRESH  # resets to step 0 (10s)
+    limiter2.gate(_fp())
+    clock2.now = 49
+    assert limiter2.gate(_fp()).kind is DecisionKind.SUPPRESS
+    clock2.now = 50  # expires at 10s base window, proving step reset to 0!
+    assert limiter2.gate(_fp()).kind is DecisionKind.EMIT_RESUME
 
 
 def test_configure_window_preserves_state() -> None:
@@ -136,7 +142,7 @@ def test_configure_window_preserves_state() -> None:
     limiter.configure_window(5)
     clock.now = 5
 
-    assert limiter.sweep() == [SweepEntry(_fp(), 1, first_suppressed_ts=0.0, last_record=None)]
+    assert limiter.sweep() == [SweepEntry(_fp(), 1, last_record=None)]
 
 
 def test_exponential_backoff_schedule_and_cap() -> None:
@@ -155,7 +161,6 @@ def test_exponential_backoff_schedule_and_cap() -> None:
 
 
 def test_backoff_scales_for_small_and_large_base_windows() -> None:
-    # Small base (10s) scales 10 -> 30 -> 120 -> 720.
     clock = Clock()
     small: RateLimiter[ErrorFingerprint] = RateLimiter(10, clock=clock)
     key = _fp()
@@ -167,7 +172,6 @@ def test_backoff_scales_for_small_and_large_base_windows() -> None:
         clock.now += 1
         assert small.gate(key).kind is DecisionKind.EMIT_RESUME
 
-    # Base larger than 21600s caps at base (never shrinks below base).
     clock_large = Clock()
     large: RateLimiter[ErrorFingerprint] = RateLimiter(30000, clock=clock_large)
     large.gate(key)
@@ -185,10 +189,10 @@ def test_reset_returns_bucket_to_base_window() -> None:
     limiter.gate(key)
     limiter.gate(key)
     clock.now = 10
-    assert len(limiter.sweep()) == 1  # now at step 1 (30s window)
+    assert len(limiter.sweep()) == 1  # step 1 (30s)
 
     limiter.reset(key)
     assert limiter.gate(key).kind is DecisionKind.EMIT_FRESH
     limiter.gate(key)
-    clock.now = 20  # 10s base window expires, proving reset cleared step 1
+    clock.now = 20  # 10s base window expires
     assert len(limiter.sweep()) == 1

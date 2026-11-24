@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from .formatter import (
@@ -146,15 +147,20 @@ class ErrorNotifierWorker:
                 pass
 
     async def _run(self) -> None:
+        last_sweep = self._clock()
         while True:
             try:
                 record = await asyncio.wait_for(self._queue.get(), timeout=self._sweep_interval())
             except TimeoutError:
                 await self._emit_sweep_summaries()
+                last_sweep = self._clock()
                 continue
 
             try:
                 await self._handle_record(record)
+                if self._clock() - last_sweep >= self._sweep_interval():
+                    await self._emit_sweep_summaries()
+                    last_sweep = self._clock()
             finally:
                 self._queue.task_done()
 
@@ -165,25 +171,30 @@ class ErrorNotifierWorker:
         if not matches(record, self._settings):
             return
 
-        fp = record.fingerprint
-        decision = self._rate_limiter.gate(fp, record)
-        if decision.kind is DecisionKind.SUPPRESS:
+        room = await self._resolve_ops_room()
+        if room is None:
             return
 
-        room = await self._resolve_ops_room()
-        if room is None or await self._try_send_related_cascade(room, record, fp):
+        fp = record.fingerprint
+        corr_id = non_empty_str(record.event_dict.get("correlation_id"))
+        if corr_id is not None and await self._try_send_related_cascade(room, record, fp, corr_id):
+            return
+
+        decision = self._rate_limiter.gate(fp, record)
+        if decision.kind is DecisionKind.SUPPRESS:
+            if corr_id is not None and (existing := self._thread_store.get(room.room_id, fp)) is not None:
+                self._thread_store.record_correlation(room.room_id, corr_id, existing.thread_id, fp)
             return
 
         existing = self._thread_store.get(room.room_id, fp)
         previous_thread: tuple[str, str] | None = None
         if existing is not None:
-            if await self._is_thread_resolved(room.room_id, existing.thread_id):
-                self._thread_store.forget(room.room_id, fp)
+            resolved, _ = await self._resolved_at(room.room_id, existing.thread_id)
+            if resolved:
                 previous_thread = (room.room_id, existing.thread_id)
             else:
                 is_rollup = decision.kind is DecisionKind.EMIT_RESUME
                 count = decision.suppressed_count + 1 if is_rollup else 1
-                corr_id = non_empty_str(record.event_dict.get("correlation_id"))
                 self._thread_store.record_correlation(room.room_id, corr_id, existing.thread_id, fp)
                 await self._send_followup(room, fp, existing, record, count=count, is_rollup=is_rollup)
                 return
@@ -193,15 +204,19 @@ class ErrorNotifierWorker:
         await self._send_root_alert(room, record, fp, previous_thread=previous_thread)
 
     async def _try_send_related_cascade(
-        self, room: ResolvedOpsRoom, record: ObservedError, fp: ErrorFingerprint
+        self, room: ResolvedOpsRoom, record: ObservedError, fp: ErrorFingerprint, corr_id: str
     ) -> bool:
-        corr_id = non_empty_str(record.event_dict.get("correlation_id"))
         entry = self._thread_store.lookup_correlation(room.room_id, corr_id)
-        if corr_id is None or entry is None or entry.primary_fingerprint == fp:
+        if entry is None or entry.primary_fingerprint == fp:
             return False
-        if await self._is_thread_resolved(room.room_id, entry.thread_id):
+        window = self._settings.rate_limit_seconds
+        if self._thread_store.is_cascade_throttled(entry.thread_id, fp, window):
+            return True
+        resolved, _ = await self._resolved_at(room.room_id, entry.thread_id)
+        if resolved:
             self._thread_store.forget_correlation(room.room_id, corr_id)
             return False
+        self._thread_store.record_cascade_emit(entry.thread_id, fp, window)
         await self._send_text(
             format_related_alert(record, action_for(record)),
             extra_content_for(record, self._settings.include_stack_traces),
@@ -220,9 +235,11 @@ class ErrorNotifierWorker:
     ) -> None:
         last_error, seen_at = raw_error_text(record), timestamp_for(record)
         corr_id = non_empty_str(record.event_dict.get("correlation_id"))
+        replaced_id = previous_thread[1] if previous_thread is not None else None
 
         def _on_delivered(event_id: str) -> None:
-            if self._thread_store.get(room.room_id, fp) is None:
+            current = self._thread_store.get(room.room_id, fp)
+            if current is None or (replaced_id is not None and current.thread_id == replaced_id):
                 self._thread_store.record(room.room_id, fp, event_id, last_error, seen_at)
             self._thread_store.record_correlation(room.room_id, corr_id, event_id, fp)
 
@@ -269,28 +286,37 @@ class ErrorNotifierWorker:
             if existing is None:
                 self._rate_limiter.reset(entry.key)
                 continue
-            if await self._is_thread_resolved(room.room_id, existing.thread_id):
-                self._thread_store.forget(room.room_id, entry.key)
+            resolved, resolved_at = await self._resolved_at(room.room_id, existing.thread_id)
+            if resolved:
                 self._rate_limiter.reset(entry.key)
+                record = entry.last_record
+                record_dt = _parse_iso_datetime(record.timestamp) if record is not None else None
+                if record is not None and (resolved_at is None or record_dt is None or record_dt > resolved_at):
+                    self._rate_limiter.gate(entry.key, record)
+                    await self._send_root_alert(
+                        room, record, entry.key, previous_thread=(room.room_id, existing.thread_id)
+                    )
                 continue
             await self._send_followup(
                 room, entry.key, existing, entry.last_record, count=entry.suppressed_count, is_rollup=True
             )
 
-    async def _is_thread_resolved(self, room_id: str, thread_id: str) -> bool:
+    async def _resolved_at(self, room_id: str, thread_id: str) -> tuple[bool, datetime | None]:
         query = getattr(self._ctx, "query_room_state", None)
         if not callable(query):
-            return False
+            return False, None
         state_key = json.dumps([thread_id, "resolved"], separators=(",", ":"))
         token = self._sending.set(True)
         try:
             result = await query(room_id, THREAD_TAGS_EVENT_TYPE, state_key)
         except Exception as exc:
             _WARNING_LOGGER.warning("error-notifier failed to query resolved state for thread %s: %s", thread_id, exc)
-            return False
+            return False, None
         finally:
             self._sending.reset(token)
-        return isinstance(result, dict) and bool(result)
+        if not (isinstance(result, dict) and bool(result)):
+            return False, None
+        return True, _parse_iso_datetime(result.get("set_at"))
 
     async def _send_text(
         self,
@@ -363,6 +389,17 @@ class ErrorNotifierWorker:
             return None
         self._resolved_room = resolved
         return resolved
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    text = non_empty_str(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return (parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed).astimezone(UTC)
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:

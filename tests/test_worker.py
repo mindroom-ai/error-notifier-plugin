@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 from pathlib import Path
@@ -14,8 +13,7 @@ import pytest
 from conftest import FakeHookContext, FakeMatrixAdmin, remove_installed_handlers
 from error_notifier_test_import import worker as worker_module
 from error_notifier_test_import.log_handler import install_error_log_handler
-from error_notifier_test_import.models import ErrorFingerprint, NotifierSettings, ObservedError
-from error_notifier_test_import.thread_store import ThreadStore
+from error_notifier_test_import.models import NotifierSettings, ObservedError
 from error_notifier_test_import.worker import (
     _SEND_RETRY_BACKOFF_SECONDS,
     ErrorNotifierWorker,
@@ -60,7 +58,7 @@ async def test_queue_draining_delivers_single_event() -> None:
 
     assert len(ctx.sent) == 1
     assert ctx.sent[0]["room_id"] == "!ops:localhost"
-    assert "🚨 mindroom.orchestrator: test_burst_error" in ctx.sent[0]["text"]
+    assert r"🚨 mindroom.orchestrator: test\_burst\_error" in ctx.sent[0]["text"]
     assert ctx.sent[0]["thread_id"] is None
 
 
@@ -516,19 +514,18 @@ async def test_open_thread_persists_across_restart_and_deduplicates_error(tmp_pa
     settings = NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",))
     worker1 = ErrorNotifierWorker(ctx, settings, deps=WorkerDeps(clock=clock))
 
-    # 1. Root alert opens thread and writes open_threads.json.
     await worker1._handle_record(_record(event_dict={"error": "502 Bad Gateway"}))
     assert (tmp_path / "open_threads.json").exists()
     assert ctx.sent[0]["thread_id"] is None
 
-    # 2. Same error inside window -> suppressed; sweep sends compact 1-line rollup without repeating error:.
+    # Same error inside window -> suppressed; sweep sends compact 1-line rollup without repeating error:.
     await worker1._handle_record(_record(event_dict={"error": "502 Bad Gateway"}))
     clock.now = 10
     await worker1._emit_sweep_summaries()
     assert ctx.sent[1]["thread_id"] == "$event-1"
     assert ctx.sent[1]["text"] == "🔁 +1 occurrence (latest: 2026-05-20T21:29:40+00:00)"
 
-    # 3. Restart worker from same state_root; error recurs with changed message -> replies in same thread with error:.
+    # Restart worker from same state_root; error recurs with changed message -> replies in same thread with error:.
     worker2 = ErrorNotifierWorker(ctx, settings, deps=WorkerDeps(clock=clock))
     await worker2._handle_record(
         _record(timestamp="2026-05-20T22:00:00+00:00", event_dict={"error": "503 Service Unavailable"})
@@ -545,17 +542,23 @@ async def test_distinct_fingerprints_open_separate_threads() -> None:
 
     await worker._handle_record(
         _record(
-            logger="mindroom.hooks", event="hook_failed", event_dict={"plugin_name": "p1", "error": "TimeoutError: a"}
+            logger="mindroom.hooks",
+            event="hook_failed",
+            event_dict={"plugin_name": "p1", "error_type": "TimeoutError", "error": "timed out"},
         )
     )
     await worker._handle_record(
         _record(
-            logger="mindroom.hooks", event="hook_failed", event_dict={"plugin_name": "p2", "error": "TimeoutError: b"}
+            logger="mindroom.hooks",
+            event="hook_failed",
+            event_dict={"plugin_name": "p2", "error_type": "TimeoutError", "error": "timed out"},
         )
     )
     await worker._handle_record(
         _record(
-            logger="mindroom.hooks", event="hook_failed", event_dict={"plugin_name": "p1", "error": "ValueError: c"}
+            logger="mindroom.hooks",
+            event="hook_failed",
+            event_dict={"plugin_name": "p1", "error_type": "ValueError", "error": "bad value"},
         )
     )
 
@@ -583,11 +586,12 @@ async def test_resolved_thread_reopens_with_link_and_resets_backoff(tmp_path: Pa
     await worker._emit_sweep_summaries()
     assert len(ctx.sent) == 2
 
-    # Cleared tag ({}) is still open -> stays in $event-1.
+    # Cleared tag ({}) is still open -> stays in $event-1. Suppress one and resume -> step 2 (120s window).
     ctx.set_thread_resolved("!ops:localhost", "$event-1", cleared=True)
+    await worker._handle_record(_record())
     clock.now = 40
     await worker._handle_record(_record())
-    assert ctx.sent[2]["thread_id"] == "$event-1"  # now step 2 (120s window)
+    assert ctx.sent[2]["thread_id"] == "$event-1"
 
     # Mark $event-1 resolved -> next error after window forgets old thread, resets backoff, opens new root with link.
     ctx.set_thread_resolved("!ops:localhost", "$event-1", resolved=True)
@@ -595,7 +599,10 @@ async def test_resolved_thread_reopens_with_link_and_resets_backoff(tmp_path: Pa
     await worker._handle_record(_record())
     assert len(ctx.sent) == 4
     assert ctx.sent[3]["thread_id"] is None
-    assert "reoccurred: [previous resolved thread](https://matrix.to/#/!ops:localhost/$event-1)" in ctx.sent[3]["text"]
+    assert (
+        "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24event-1)"
+        in ctx.sent[3]["text"]
+    )
 
     # Verify backoff was reset to base (10s), NOT 120s/720s!
     await worker._handle_record(_record())
@@ -606,42 +613,84 @@ async def test_resolved_thread_reopens_with_link_and_resets_backoff(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_sweep_drops_stale_summary_when_thread_resolved_or_missing() -> None:
+async def test_sweep_resolution_ordering_drops_pre_resolve_and_reopens_post_resolve() -> None:
+    # (a) Repeat BEFORE resolve -> sweep drops stale summary, keeps existing, next occurrence reopens WITH backlink.
+    clock_a = Clock()
+    ctx_a = _ctx()
+    worker_a = ErrorNotifierWorker(
+        ctx_a,
+        NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",)),
+        deps=WorkerDeps(clock=clock_a),
+    )
+    await worker_a._handle_record(_record(timestamp="2026-05-20T21:00:00+00:00"))
+    await worker_a._handle_record(_record(timestamp="2026-05-20T21:00:02+00:00"))
+    ctx_a.set_thread_resolved("!ops:localhost", "$event-1", resolved=True, set_at="2026-05-20T21:00:05+00:00")
+    clock_a.now = 10
+    await worker_a._emit_sweep_summaries()
+    assert len(ctx_a.sent) == 1  # stale pre-resolution summary dropped
+
+    # Next post-resolve occurrence reopens immediately WITH the reoccurred: link!
+    await worker_a._handle_record(_record(timestamp="2026-05-20T21:00:12+00:00"))
+    assert len(ctx_a.sent) == 2
+    assert ctx_a.sent[1]["thread_id"] is None
+    assert (
+        "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24event-1)"
+        in ctx_a.sent[1]["text"]
+    )
+
+    # (b) Resolve FIRST, then recurrence INSIDE backoff window -> sweep reopens a new root WITH backlink!
+    clock_b = Clock()
+    ctx_b = _ctx()
+    worker_b = ErrorNotifierWorker(
+        ctx_b,
+        NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",)),
+        deps=WorkerDeps(clock=clock_b),
+    )
+    await worker_b._handle_record(_record(timestamp="2026-05-20T21:00:00+00:00"))
+    ctx_b.set_thread_resolved("!ops:localhost", "$event-1", resolved=True, set_at="2026-05-20T21:00:03+00:00")
+    await worker_b._handle_record(_record(timestamp="2026-05-20T21:00:05+00:00"))  # suppressed inside window
+    clock_b.now = 10
+    await worker_b._emit_sweep_summaries()
+    assert len(ctx_b.sent) == 2
+    assert ctx_b.sent[1]["thread_id"] is None
+    assert (
+        "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24event-1)"
+        in ctx_b.sent[1]["text"]
+    )
+
+    # Subsequent repeat bundles into the newly reopened $event-2 (not old $event-1).
+    await worker_b._handle_record(_record(timestamp="2026-05-20T21:00:15+00:00"))
+    clock_b.now = 20
+    await worker_b._emit_sweep_summaries()
+    assert len(ctx_b.sent) == 3
+    assert ctx_b.sent[2]["thread_id"] == "$event-2"
+
+    # Missing/unparseable set_at on resolved tag also fails safe and reopens instead of dropping.
+    ctx_b.set_thread_resolved("!ops:localhost", "$event-2", resolved=True, set_at=None)
+    await worker_b._handle_record(_record(timestamp="2026-05-20T21:00:25+00:00"))
+    clock_b.now = 50
+    await worker_b._emit_sweep_summaries()
+    assert len(ctx_b.sent) == 4
+    assert ctx_b.sent[3]["thread_id"] is None
+    assert "%24event-2" in ctx_b.sent[3]["text"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_orphan_summary_when_root_send_failed() -> None:
     clock = Clock()
     ctx = _ctx()
+    ctx.send_raises = RuntimeError("homeserver down")
     worker = ErrorNotifierWorker(
         ctx,
         NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",)),
         deps=WorkerDeps(clock=clock),
     )
-
-    # 1. Resolved before sweep -> drop stale suppression summary completely.
     await worker._handle_record(_record())
     await worker._handle_record(_record())
-    ctx.set_thread_resolved("!ops:localhost", "$event-1", resolved=True)
+    ctx.send_raises = None
     clock.now = 10
     await worker._emit_sweep_summaries()
-    assert len(ctx.sent) == 1
-
-    # Next error immediately opens a fresh root because sweep cleared bucket & thread.
-    await worker._handle_record(_record())
-    assert len(ctx.sent) == 2
-    assert ctx.sent[1]["thread_id"] is None
-
-    # 2. Root send fails permanently -> sweep skips emitting an orphan summary.
-    ctx_fail = _ctx()
-    ctx_fail.send_raises = RuntimeError("homeserver down")
-    worker_fail = ErrorNotifierWorker(
-        ctx_fail,
-        NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",)),
-        deps=WorkerDeps(clock=clock),
-    )
-    await worker_fail._handle_record(_record())
-    await worker_fail._handle_record(_record())
-    ctx_fail.send_raises = None
-    clock.now = 20
-    await worker_fail._emit_sweep_summaries()
-    assert ctx_fail.sent == []
+    assert ctx.sent == []
 
 
 @pytest.mark.asyncio
@@ -666,7 +715,6 @@ async def test_resolved_check_error_fails_safe_without_feedback_loop(caplog: pyt
         clock.now = 5
         await worker._handle_record(_record())
 
-        # Treated as still open (replies in $event-1, no duplicate root) and internal log was suppressed!
         assert [msg["thread_id"] for msg in ctx.sent] == [None, "$event-1"]
         assert received == []
         assert "failed to query resolved state" in caplog.text
@@ -732,7 +780,6 @@ async def test_async_retry_records_open_thread_for_subsequent_rollups() -> None:
     await asyncio.wait_for(asyncio.gather(*list(worker_module._retry_tasks)), timeout=1)
     assert len(ctx.sent) == 2
 
-    # Repeat and sweep now bundle into $retried-root!
     await worker._handle_record(_record())
     clock.now = 10
     await worker._emit_sweep_summaries()
@@ -741,7 +788,7 @@ async def test_async_retry_records_open_thread_for_subsequent_rollups() -> None:
 
 
 @pytest.mark.asyncio
-async def test_correlation_id_bundles_same_turn_cascade_without_overwriting_secondary_root() -> None:
+async def test_correlation_cascade_across_turns_and_immediate_standalone_secondary() -> None:
     clock = Clock()
     ctx = _ctx()
     worker = ErrorNotifierWorker(
@@ -750,93 +797,128 @@ async def test_correlation_id_bundles_same_turn_cascade_without_overwriting_seco
         deps=WorkerDeps(clock=clock),
     )
 
-    primary = _record(
-        logger="mindroom.hooks",
-        event="hook_failed",
-        event_dict={"plugin_name": "voice", "correlation_id": "turn-1", "error": "TimeoutError: slow"},
-    )
-    secondary = _record(
-        logger="mindroom.ai",
-        event="model_invocation_failed",
-        event_dict={"provider": "openrouter", "correlation_id": "turn-1", "error": "RuntimeError: cascade"},
-        exception=(
-            "Traceback (most recent call last):\n"
-            '  File "/app/mindroom/ai.py", line 1, in run\n'
-            "    raise x\nRuntimeError: cascade\n"
-        ),
-    )
+    def _primary(corr_id: str) -> ObservedError:
+        return _record(
+            logger="mindroom.hooks",
+            event="hook_failed",
+            event_dict={
+                "plugin_name": "voice",
+                "correlation_id": corr_id,
+                "error_type": "TimeoutError",
+                "error": "slow",
+            },
+        )
 
-    # Primary opens $event-1; secondary with same correlation_id within 60s posts 🔗 inside $event-1 with stack extra.
-    await worker._handle_record(primary)
-    clock.now = 2
-    await worker._handle_record(secondary)
+    def _secondary(corr_id: str | None) -> ObservedError:
+        event_dict: dict[str, object] = {"provider": "openrouter", "error": "ProviderUnavailable('cascade')"}
+        if corr_id is not None:
+            event_dict["correlation_id"] = corr_id
+        return _record(
+            logger="mindroom.ai",
+            event="model_invocation_failed",
+            event_dict=event_dict,
+            exception=(
+                "Traceback (most recent call last):\n"
+                '  File "/app/mindroom/ai.py", line 1, in run\n'
+                "    raise x\nProviderUnavailable: cascade\n"
+            ),
+        )
+
+    # Turn 1 (t=0): Primary A opens $event-1; secondary B posts 🔗 inside $event-1 with stack extra.
+    await worker._handle_record(_primary("turn-1"))
+    clock.now = 1
+    await worker._handle_record(_secondary("turn-1"))
     assert len(ctx.sent) == 2
     assert ctx.sent[0]["thread_id"] is None
     assert ctx.sent[1]["thread_id"] == "$event-1"
-    assert "🔗 Related error (same turn) — mindroom.ai (openrouter): RuntimeError" in ctx.sent[1]["text"]
+    assert "🔗 Related error (same turn) — mindroom.ai (openrouter): ProviderUnavailable" in ctx.sent[1]["text"]
     assert ctx.sent[1]["extra_content"] is not None
 
-    # Repeat of secondary in same turn is rate-limited (no spam).
-    await worker._handle_record(secondary)
+    # Turn 2 (t=2, inside A's backoff window): A hits SUPPRESS yet records turn-2 -> $event-1;
+    # B is throttled in $event-1 (no duplicate 🔗 AND no orphan top-level root for B!).
+    clock.now = 2
+    await worker._handle_record(_primary("turn-2"))
+    await worker._handle_record(_secondary("turn-2"))
     assert len(ctx.sent) == 2
 
-    # Later in another turn (after rate-limit window, no correlation_id), secondary gets its OWN top-level thread!
-    clock.now = 15
-    standalone_secondary = _record(
-        logger="mindroom.ai",
-        event="model_invocation_failed",
-        event_dict={"provider": "openrouter", "error": "RuntimeError: standalone"},
-    )
-    await worker._handle_record(standalone_secondary)
-    assert len(ctx.sent) == 3
-    assert ctx.sent[2]["thread_id"] is None
-    assert "🚨 mindroom.ai (openrouter): RuntimeError" in ctx.sent[2]["text"]
+    # Turn 3 (t=12, after window): A posts rollup in $event-1 and B posts one new 🔗 in $event-1.
+    clock.now = 12
+    await worker._handle_record(_primary("turn-3"))
+    await worker._handle_record(_secondary("turn-3"))
+    assert len(ctx.sent) == 4
+    assert ctx.sent[2]["thread_id"] == "$event-1"
+    assert ctx.sent[3]["thread_id"] == "$event-1"
+    assert "🔗 Related error (same turn)" in ctx.sent[3]["text"]
 
-    # Expired correlation_id (>=60s) or resolved parent thread opens a new top-level thread instead of bundling.
-    clock.now = 70
-    expired_related = _record(
-        logger="mindroom.tools",
-        event="tool_failed",
-        event_dict={"tool_name": "shell", "correlation_id": "turn-1", "error": "OSError: late"},
-    )
-    await worker._handle_record(expired_related)
-    assert ctx.sent[3]["thread_id"] is None
-
-    # Resolved primary thread during 60s window also prevents posting into the resolved thread.
-    ctx.set_thread_resolved("!ops:localhost", "$event-4", resolved=True)
-    clock.now = 75
-    after_resolved = _record(
-        logger="mindroom.storage",
-        event="write_failed",
-        event_dict={"correlation_id": "turn-1", "error": "OSError: disk"},
-    )
-    await worker._handle_record(after_resolved)
+    # Standalone B IMMEDIATELY after (t=13, no correlation_id) has an untouched standalone bucket -> opens own root!
+    clock.now = 13
+    await worker._handle_record(_secondary(None))
+    assert len(ctx.sent) == 5
     assert ctx.sent[4]["thread_id"] is None
+    assert "🚨 mindroom.ai (openrouter): ProviderUnavailable" in ctx.sent[4]["text"]
+
+    # Expired correlation_id (>=60s) and resolved parent thread both open their own top-level threads.
+    clock.now = 80
+    await worker._handle_record(
+        _record(
+            logger="mindroom.tools",
+            event="tool_failed",
+            event_dict={"tool_name": "shell", "correlation_id": "turn-3", "error_type": "OSError", "error": "late"},
+        )
+    )
+    assert ctx.sent[5]["thread_id"] is None
+
+    ctx.set_thread_resolved("!ops:localhost", "$event-6", resolved=True)
+    clock.now = 85
+    await worker._handle_record(
+        _record(
+            logger="mindroom.storage",
+            event="write_failed",
+            event_dict={"correlation_id": "turn-3", "error_type": "OSError", "error": "disk"},
+        )
+    )
+    assert ctx.sent[6]["thread_id"] is None
 
 
-def test_thread_store_corrupt_json_and_pruning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    # Corrupt JSON starts fresh and warns.
-    (tmp_path / "open_threads.json").write_text("{not valid json", encoding="utf-8")
-    store = ThreadStore(tmp_path, max_per_room=2)
-    assert "failed to load" in caplog.text
+@pytest.mark.asyncio
+async def test_run_loop_sweeps_under_continuous_traffic_and_quiet_window_resets_backoff() -> None:
+    clock = Clock()
+    ctx = _ctx()
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(rate_limit_seconds=10),
+        deps=WorkerDeps(clock=clock),
+    )
+    worker.start()
+    try:
+        # Error A opens $event-1 at t=0, then suppresses a repeat at t=1.
+        worker.submit(_record(logger="mindroom.a", event="err_a"))
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+        clock.now = 1
+        worker.submit(_record(logger="mindroom.a", event="err_a"))
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
+        assert len(ctx.sent) == 1
 
-    # Prunes oldest by last_seen_at beyond max_per_room and persists atomically.
-    fp1 = ErrorFingerprint("mindroom.a", "e1")
-    fp2 = ErrorFingerprint("mindroom.a", "e2")
-    fp3 = ErrorFingerprint("mindroom.a", "e3")
-    store.record("!ops:localhost", fp1, "$1", "err1", "2026-05-20T01:00:00+00:00")
-    store.record("!ops:localhost", fp2, "$2", "err2", "2026-05-20T02:00:00+00:00")
-    store.record("!ops:localhost", fp3, "$3", "err3", "2026-05-20T03:00:00+00:00")
+        # Advance clock past A's window and immediately submit traffic on another logger (no wait_for timeout!).
+        clock.now = 10
+        worker.submit(_record(logger="mindroom.b", event="err_b"))
+        await asyncio.wait_for(worker.queue.join(), timeout=1)
 
-    reloaded = ThreadStore(tmp_path, max_per_room=2)
-    assert reloaded.get("!ops:localhost", fp1) is None
-    assert reloaded.get("!ops:localhost", fp2) is not None
-    assert reloaded.get("!ops:localhost", fp3) is not None
+        # Steady traffic on logger B must NOT starve A's sweep rollup!
+        assert len(ctx.sent) == 3
+        assert ctx.sent[1]["thread_id"] is None  # err_b root
+        assert ctx.sent[2]["thread_id"] == "$event-1"  # err_a sweep rollup (A now at step 1 -> 30s)
 
-    # Partially corrupt entries are skipped with warning while preserving valid ones.
-    data = json.loads((tmp_path / "open_threads.json").read_text(encoding="utf-8"))
-    data["!ops:localhost"]["bad_entry"] = {"thread_id": ""}
-    (tmp_path / "open_threads.json").write_text(json.dumps(data), encoding="utf-8")
-    partial = ThreadStore(tmp_path, max_per_room=2)
-    assert partial.get("!ops:localhost", fp2) is not None
-    assert "skipped 1 corrupt" in caplog.text
+        # Quiet 30s window for A WITHOUT any sweep -> recurrence resets backoff to step 0 (10s base)!
+        clock.now = 40
+        await worker._handle_record(_record(logger="mindroom.a", event="err_a"))
+        assert ctx.sent[3]["thread_id"] == "$event-1"
+        assert "🔁 Recurred —" in ctx.sent[3]["text"]
+        await worker._handle_record(_record(logger="mindroom.a", event="err_a"))
+        clock.now = 50  # expires after 10s base window, proving backoff reset!
+        await worker._emit_sweep_summaries()
+        assert len(ctx.sent) == 5
+        assert ctx.sent[4]["thread_id"] == "$event-1"
+    finally:
+        worker.cancel()
+        await worker.wait_closed()

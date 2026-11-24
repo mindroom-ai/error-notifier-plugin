@@ -30,8 +30,6 @@ class Decision:
 
     kind: DecisionKind
     suppressed_count: int = 0
-    first_suppressed_ts: float | None = None
-    last_record: ObservedError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +38,6 @@ class SweepEntry[K]:
 
     key: K
     suppressed_count: int
-    first_suppressed_ts: float | None = None
     last_record: ObservedError | None = None
 
 
@@ -49,15 +46,13 @@ class _Bucket:
     last_emit: float
     step: int = 0
     suppressed_count: int = 0
-    first_suppressed_ts: float | None = None
     last_record: ObservedError | None = None
 
-    def advance(self, now: float) -> tuple[int, float | None, ObservedError | None]:
-        result = (self.suppressed_count, self.first_suppressed_ts, self.last_record)
+    def advance(self, now: float) -> tuple[int, ObservedError | None]:
+        result = (self.suppressed_count, self.last_record)
         self.last_emit = now
         self.step = min(self.step + 1, _MAX_STEP)
         self.suppressed_count = 0
-        self.first_suppressed_ts = None
         self.last_record = None
         return result
 
@@ -91,18 +86,17 @@ class RateLimiter[K]:
             return Decision(DecisionKind.EMIT_FRESH)
 
         if now - bucket.last_emit < self._window_for_step(bucket.step):
-            if bucket.suppressed_count == 0:
-                bucket.first_suppressed_ts = now
             bucket.suppressed_count += 1
             if record is not None:
                 bucket.last_record = record
-            return Decision(
-                DecisionKind.SUPPRESS, bucket.suppressed_count, bucket.first_suppressed_ts, bucket.last_record
-            )
+            return Decision(DecisionKind.SUPPRESS, bucket.suppressed_count)
 
-        suppressed_count, first_ts, prev_record = bucket.advance(now)
-        if suppressed_count:
-            return Decision(DecisionKind.EMIT_RESUME, suppressed_count, first_ts, record or prev_record)
+        if bucket.suppressed_count:
+            suppressed_count, _ = bucket.advance(now)
+            return Decision(DecisionKind.EMIT_RESUME, suppressed_count)
+
+        bucket.last_emit = now
+        bucket.step = 0
         return Decision(DecisionKind.EMIT_FRESH)
 
     def sweep(self) -> list[SweepEntry[K]]:
@@ -113,10 +107,8 @@ class RateLimiter[K]:
             if now - bucket.last_emit < self._window_for_step(bucket.step):
                 continue
             if bucket.suppressed_count:
-                count, first_ts, last_record = bucket.advance(now)
-                summaries.append(
-                    SweepEntry(key=key, suppressed_count=count, first_suppressed_ts=first_ts, last_record=last_record)
-                )
+                count, last_record = bucket.advance(now)
+                summaries.append(SweepEntry(key=key, suppressed_count=count, last_record=last_record))
                 continue
             self._buckets.pop(key, None)
         return summaries

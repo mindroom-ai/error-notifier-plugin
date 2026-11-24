@@ -88,6 +88,7 @@ def installed_sending_var() -> ContextVar[bool]:
 
 def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
     """Build a redacted snapshot of one log record."""
+    error_from_args = False
     if isinstance(record.msg, dict):
         # structlog's `wrap_for_formatter` hands the event dict to stdlib logging as the message.
         event_dict: dict[str, Any] = dict(record.msg)
@@ -97,6 +98,7 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         event_dict = {"event": str(record.msg)}
         if record.args:
             event_dict["error"] = record.getMessage()
+            error_from_args = True
         exc_info = record.exc_info
     event_dict.setdefault("logger", record.name)
     event_dict.setdefault("level", record.levelname.lower())
@@ -114,6 +116,7 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         event_dict=redacted,
         exception=None if full_exception is None else _truncate(full_exception),
         exception_summary=None if full_exception is None else traceback_summary(full_exception),
+        error_from_args=error_from_args,
     )
 
 

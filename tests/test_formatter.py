@@ -44,7 +44,7 @@ def test_alert_body_shape_without_error_type() -> None:
     )
 
 
-def test_alert_body_with_subkey_context_error_type_and_reoccurred_link() -> None:
+def test_alert_body_with_subkey_context_error_type_and_percent_encoded_reoccurred_link() -> None:
     record = _record(
         logger="mindroom.hooks",
         event="hook_execution_failed",
@@ -52,6 +52,7 @@ def test_alert_body_with_subkey_context_error_type_and_reoccurred_link() -> None
             "plugin_name": "voice-enrich",
             "hook_name": "enrich",
             "agent": "assistant",
+            "error_type": "TimeoutError",
             "error": "TimeoutError: timed out after 15s",
         },
     )
@@ -64,20 +65,21 @@ def test_alert_body_with_subkey_context_error_type_and_reoccurred_link() -> None
         "event:   hook_execution_failed\n"
         "context: plugin=voice-enrich hook=enrich agent=assistant\n"
         "error:   TimeoutError: timed out after 15s\n"
-        "reoccurred: [previous resolved thread](https://matrix.to/#/!ops:localhost/$prev1)"
+        "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24prev1)"
     )
 
 
-def test_alert_title_uses_provider_subkey() -> None:
+def test_alert_title_and_context_escape_markdown_while_action_stays_markdown() -> None:
     record = _record(
         logger="mindroom.error_handling",
         event="provider_request_failed",
-        event_dict={"provider": "openrouter", "error": "ProviderUnavailable('Connection error.')"},
+        event_dict={"provider": "open_router", "agent": "*bot*", "error": "ProviderUnavailable('Connection error.')"},
     )
-    body = format_alert(record, None)
+    body = format_alert(record, "Run `mindroom reload`.")
 
-    assert body.startswith("🚨 mindroom.error_handling (openrouter): ProviderUnavailable\n")
-    assert "\ncontext: provider=openrouter\n" in body
+    assert body.startswith("🚨 mindroom.error\\_handling (open\\_router): ProviderUnavailable\n")
+    assert "\ncontext: provider=open\\_router agent=\\*bot\\*\n" in body
+    assert "\naction:  Run `mindroom reload`." in body
 
 
 def test_multiline_error_indentation() -> None:
@@ -119,7 +121,6 @@ def test_thread_followup_formats_rollup_and_recurrence_and_deduplicates_error() 
     assert format_thread_followup(rec, count=1, is_rollup=False, last_error="502 Bad Gateway") == (
         "🔁 Recurred — 2026-05-20T21:29:40.123456+00:00"
     )
-    # Changed error or no prior error includes error: line.
     assert format_thread_followup(rec, count=3, is_rollup=True, last_error="503 Service Unavailable") == (
         "🔁 +3 occurrences (latest: 2026-05-20T21:29:40.123456+00:00)\nerror:   502 Bad Gateway"
     )
@@ -132,15 +133,15 @@ def test_related_alert_shape() -> None:
     record = _record(
         logger="mindroom.tools",
         event="tool_call_failed",
-        event_dict={"tool_name": "web_search", "error": "TimeoutError: read timed out"},
+        event_dict={"tool_name": "web_search", "error_type": "TimeoutError", "error": "TimeoutError: read timed out"},
     )
     body = format_related_alert(record, "Retry the request.")
 
     assert body == (
-        "🔗 Related error (same turn) — mindroom.tools (web_search): TimeoutError\n"
+        "🔗 Related error (same turn) — mindroom.tools (web\\_search): TimeoutError\n"
         "logger:  mindroom.tools\n"
         "event:   tool_call_failed\n"
-        "context: tool=web_search\n"
+        "context: tool=web\\_search\n"
         "error:   TimeoutError: read timed out\n"
         "action:  Retry the request."
     )
@@ -274,7 +275,6 @@ def test_syntax_error_traceback_shows_exception_and_file_line() -> None:
 
 
 def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
-    # Subkey combines plugin/hook, tool, provider in deterministic order and excludes agent / non-strings.
     rec = _record(
         logger="mindroom.hooks",
         event="hook_failed",
@@ -294,14 +294,15 @@ def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
         "TimeoutError",
     )
     assert rec.fingerprint.canonical() == (
-        '["mindroom.hooks","hook_failed","hook=voice-enrich/voice-enrich-message,tool=transcribe,provider=openai","TimeoutError"]'
+        '["mindroom.hooks","hook_failed",'
+        '"hook=voice-enrich/voice-enrich-message,tool=transcribe,provider=openai","TimeoutError"]'
     )
 
     # Single subkey variants + fallback tool key.
     assert _record(event_dict={"plugin_name": "p1", "tool": "search"}).fingerprint.subkey == "plugin=p1,tool=search"
     assert _record(event_dict={"hook_name": "h1", "provider": ""}).fingerprint.subkey == "hook=h1"
 
-    # Error type priority: explicit > exception traceback > leading class in error > "".
+    # Error type priority: explicit > exception traceback > ClassName(...) or pkg.ClassName: > "".
     tb_dotted = (
         "Traceback (most recent call last):\n"
         '  File "/app/mindroom/emb.py", line 5, in run\n    raise err\n'
@@ -310,16 +311,19 @@ def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
     assert (
         _record(event_dict={"exception_type": "CustomErr"}, exception=tb_dotted).fingerprint.error_type == "CustomErr"
     )
-    assert _record(event_dict={"error": "TimeoutError: x"}, exception=tb_dotted).fingerprint.error_type == (
+    assert _record(event_dict={"error": "TimeoutError()"}, exception=tb_dotted).fingerprint.error_type == (
         "mindroom.embeddings.errors.EmbedderRequestError"
     )
     assert _record(event_dict={"error": "ProviderUnavailable('Connection error.')"}).fingerprint.error_type == (
         "ProviderUnavailable"
     )
-    assert _record(event_dict={"error": "TimeoutError"}).fingerprint.error_type == "TimeoutError"
+    assert _record(event_dict={"error": "httpx.ReadTimeout: slow"}).fingerprint.error_type == "httpx.ReadTimeout"
+    assert _record(event_dict={"error": "ProviderUnavailable('x')"}, error_from_args=True).fingerprint.error_type == ""
 
-    # Never leaks raw messages, URLs, timestamps, or all-caps prefixes into error_type.
+    # Never leaks bare words + colon, raw messages, URLs, timestamps, or all-caps prefixes into error_type.
     for raw_error in (
+        "WorkerA: sync failed",
+        "WorkerB: sync failed",
         "boom",
         "502 Bad Gateway",
         "https://api.example.com/v1/chat",

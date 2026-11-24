@@ -133,3 +133,17 @@ def test_long_exception_summarized_before_truncation(received: list[ObservedErro
     assert observed.exception_summary is not None and len(observed.exception_summary) <= _MAX_SUMMARY_CHARS
     assert "error:   ValueError: YYY" in format_alert(observed, None)
     assert 'File "/app/client.py", line 9, in send' in format_alert(observed, None)
+
+
+def test_stdlib_percent_args_do_not_leak_into_error_type(received: list[ObservedError]) -> None:
+    log = logging.getLogger("mindroom.matrix.users")
+    log.error("%s: sync failed", "WorkerA")
+    log.error("%s: sync failed", "WorkerB")
+    get_logger("mindroom.ai").error("provider_failed", error="ProviderUnavailable('Connection error.')")
+
+    first, second, third = received
+    assert first.error_from_args and second.error_from_args
+    assert first.fingerprint == second.fingerprint
+    assert first.fingerprint.error_type == ""
+    assert not third.error_from_args
+    assert third.fingerprint.error_type == "ProviderUnavailable"
