@@ -57,11 +57,10 @@ async def test_queue_draining_delivers_single_event() -> None:
     assert len(ctx.sent) == 1
     assert ctx.sent[0]["room_id"] == "!ops:localhost"
     assert "🚨 MindRoom error" in ctx.sent[0]["text"]
-    assert ctx.sent[0]["extra_content"] is None
 
 
 @pytest.mark.asyncio
-async def test_worker_inlines_stack_trace_without_extra_content() -> None:
+async def test_worker_inlines_stack_trace_when_enabled() -> None:
     ctx = _ctx()
     worker = ErrorNotifierWorker(
         ctx,
@@ -73,7 +72,6 @@ async def test_worker_inlines_stack_trace_without_extra_content() -> None:
     assert len(ctx.sent) == 1
     assert "<details><summary>Stack trace</summary>" in ctx.sent[0]["text"]
     assert "RuntimeError: boom" in ctx.sent[0]["text"]
-    assert ctx.sent[0]["extra_content"] is None
 
 
 @pytest.mark.asyncio

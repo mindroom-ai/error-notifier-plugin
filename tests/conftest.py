@@ -70,10 +70,7 @@ class FakeHookContext:
         text: str,
         *,
         thread_id: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        trigger_dispatch: bool = False,
     ) -> str | None:
-        del trigger_dispatch
         if self.on_send is not None:
             await self.on_send(room_id)
         if self.send_raises is not None:
@@ -83,7 +80,6 @@ class FakeHookContext:
                 "room_id": room_id,
                 "text": text,
                 "thread_id": thread_id,
-                "extra_content": extra_content,
             },
         )
         return self.send_result

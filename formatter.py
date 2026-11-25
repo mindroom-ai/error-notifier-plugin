@@ -39,12 +39,9 @@ def format_alert(
         lines.extend(_format_error_lines(error_text))
     if action:
         lines.append(f"action: {action}")
-    body = "\n".join(lines)
-    if include_stack_traces and record.exception:
-        stack_trace = _format_stack_trace(record.exception)
-        if stack_trace:
-            return f"{body}\n\n{stack_trace}"
-    return body
+    if include_stack_traces and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
+    return "\n".join(lines)
 
 
 def format_suppression_summary(key: tuple[str, str], count: int) -> str:
@@ -59,18 +56,10 @@ def format_suppression_summary(key: tuple[str, str], count: int) -> str:
     )
 
 
-def _format_stack_trace(exception: str) -> str | None:
-    content = exception.rstrip("\r\n")
-    if not content.strip():
-        return None
-    bounded = _cap(content, _MAX_STACK_TRACE_CHARS)
-    fence = _backtick_fence_for(bounded)
+def _format_stack_trace(exception: str) -> str:
+    bounded = _cap(exception.rstrip("\r\n"), _MAX_STACK_TRACE_CHARS)
+    fence = "`" * max(3, 1 + max(map(len, _BACKTICK_RUN_RE.findall(bounded)), default=0))
     return f"<details><summary>Stack trace</summary>\n\n{fence}\n{bounded}\n{fence}\n\n</details>"
-
-
-def _backtick_fence_for(text: str) -> str:
-    longest_run = max((len(match.group(0)) for match in _BACKTICK_RUN_RE.finditer(text)), default=0)
-    return "`" * max(3, longest_run + 1)
 
 
 def _timestamp(record: ObservedError) -> str:
