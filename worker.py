@@ -7,9 +7,9 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
 
-from .formatter import extra_content_for, format_alert, format_suppression_summary
+from .formatter import format_alert, format_suppression_summary
 from .log_handler import installed_sending_var
 from .models import NotifierSettings, ObservedError, ResolvedOpsRoom
 from .rate_limit import DecisionKind, RateLimiter
@@ -36,8 +36,6 @@ class _SendContext(Protocol):
         text: str,
         *,
         thread_id: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send one Matrix message."""
 
@@ -163,32 +161,35 @@ class ErrorNotifierWorker:
         if decision.kind is DecisionKind.SUPPRESS:
             return
         if decision.kind is DecisionKind.EMIT_RESUME:
-            await self._send_text(format_suppression_summary(record.key, decision.suppressed_count), None)
+            await self._send_text(format_suppression_summary(record.key, decision.suppressed_count))
 
         await self._send_text(
-            format_alert(record, action_for(record)),
-            extra_content_for(record, self._settings.include_stack_traces),
+            format_alert(
+                record,
+                action_for(record),
+                include_stack_traces=self._settings.include_stack_traces,
+            ),
         )
 
     async def _emit_sweep_summaries(self) -> None:
         for key, count in self._rate_limiter.sweep():
-            await self._send_text(format_suppression_summary(key, count), None)
+            await self._send_text(format_suppression_summary(key, count))
 
-    async def _send_text(self, body: str, extra_content: dict[str, Any] | None) -> None:
+    async def _send_text(self, body: str) -> None:
         room = await self._resolve_ops_room()
         if room is None:
             return
-        if not await self._attempt_send(room, body, extra_content):
-            task = asyncio.create_task(self._retry_send(room, body, extra_content), name="error-notifier-retry")
+        if not await self._attempt_send(room, body):
+            task = asyncio.create_task(self._retry_send(room, body), name="error-notifier-retry")
             _retry_tasks.add(task)
             task.add_done_callback(_retry_tasks.discard)
 
-    async def _retry_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> None:
+    async def _retry_send(self, room: ResolvedOpsRoom, body: str) -> None:
         await self._deps.sleep(_SEND_RETRY_BACKOFF_SECONDS)
-        if not await self._attempt_send(room, body, extra_content):
+        if not await self._attempt_send(room, body):
             _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
 
-    async def _attempt_send(self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None) -> bool:
+    async def _attempt_send(self, room: ResolvedOpsRoom, body: str) -> bool:
         """Send one message; return True if delivered or handled on error, False when no event id was returned."""
         try:
             token = self._sending.set(True)
@@ -197,7 +198,6 @@ class ErrorNotifierWorker:
                     room_id=room.room_id,
                     text=body,
                     thread_id=None,
-                    extra_content=extra_content,
                 )
             finally:
                 self._sending.reset(token)

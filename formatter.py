@@ -5,16 +5,11 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
-from mindroom.matrix.message_extras import (
-    MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS,
-    MatrixMessageExtra,
-    build_message_extras_content,
-)
-
 from .models import ObservedError
 
 _FRAME_RE = re.compile(r'^\s*(File "[^"]+", line \d+(?:, in .+)?)$')
 _GUTTER_RE = re.compile(r"^(?:[ ]+\|)+(?: |$)")
+_BACKTICK_RUN_RE = re.compile(r"`+")
 _BORDER_CHARS = frozenset(" +-0123456789")
 _CHAIN_MARKERS = (
     "Traceback (most recent call last):",
@@ -24,9 +19,15 @@ _CHAIN_MARKERS = (
     "The above exception was the direct cause",
 )
 _MAX_SUMMARY_CHARS = 300
+_MAX_STACK_TRACE_CHARS = 16 * 1024
 
 
-def format_alert(record: ObservedError, action: str | None) -> str:
+def format_alert(
+    record: ObservedError,
+    action: str | None,
+    *,
+    include_stack_traces: bool = False,
+) -> str:
     """Format one alert body."""
     lines = [
         f"🚨 MindRoom error — {_timestamp(record)}",
@@ -38,7 +39,12 @@ def format_alert(record: ObservedError, action: str | None) -> str:
         lines.extend(_format_error_lines(error_text))
     if action:
         lines.append(f"action: {action}")
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    if include_stack_traces and record.exception:
+        stack_trace = _format_stack_trace(record.exception)
+        if stack_trace:
+            return f"{body}\n\n{stack_trace}"
+    return body
 
 
 def format_suppression_summary(key: tuple[str, str], count: int) -> str:
@@ -53,21 +59,18 @@ def format_suppression_summary(key: tuple[str, str], count: int) -> str:
     )
 
 
-def extra_content_for(record: ObservedError, include_stack_traces: bool) -> dict[str, object] | None:
-    """Build collapsed traceback extras when stack traces are enabled."""
-    if not include_stack_traces or not record.exception:
+def _format_stack_trace(exception: str) -> str | None:
+    content = exception.rstrip("\r\n")
+    if not content.strip():
         return None
-    content = record.exception[:MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS]
-    return build_message_extras_content(
-        [
-            MatrixMessageExtra(
-                title="Stack trace",
-                content=content,
-                content_type="text/markdown",
-                collapsed=True,
-            ),
-        ],
-    )
+    bounded = _cap(content, _MAX_STACK_TRACE_CHARS)
+    fence = _backtick_fence_for(bounded)
+    return f"<details><summary>Stack trace</summary>\n\n{fence}\n{bounded}\n{fence}\n\n</details>"
+
+
+def _backtick_fence_for(text: str) -> str:
+    longest_run = max((len(match.group(0)) for match in _BACKTICK_RUN_RE.finditer(text)), default=0)
+    return "`" * max(3, longest_run + 1)
 
 
 def _timestamp(record: ObservedError) -> str:

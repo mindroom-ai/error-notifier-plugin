@@ -46,7 +46,7 @@ Needs MindRoom v2026.11.491 or later (plugin API 1.33).
 |---------|---------|-------------|
 | `ops_room` | `ops` | Where alerts go: a plain name (an alias on MindRoom's homeserver), `#alias:server`, or `!id:server`. |
 | `rate_limit_seconds` | `300` | Window in which repeats of the same logger and event are suppressed. |
-| `include_stack_traces` | `false` | Attach the traceback as a collapsed section of the alert. |
+| `include_stack_traces` | `false` | Include the traceback as a collapsed `<details>` section of the alert. |
 | `ignore_loggers` | none | Extra logger prefixes to ignore. |
 | `extra_loggers` | none | Extra logger prefixes to watch, beyond `mindroom` and `livekit`. |
 | `extra_events` | none | Extra structured event names to watch, from any logger. |
@@ -74,7 +74,7 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 4. The first record of a `(logger, event)` pair is sent at once. Repeats inside `rate_limit_seconds` are counted; when the window ends, one summary is sent. A new occurrence after a quiet window sends the summary, then the fresh alert.
 5. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
 
-If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert, but applying changed plugin settings requires restarting MindRoom. Tracebacks are never inlined in the alert body.
+If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert, but applying changed plugin settings requires restarting MindRoom. Tracebacks are omitted unless `include_stack_traces` is enabled, in which case they are included in a collapsed `<details>` block.
 
 </details>
 
@@ -84,7 +84,7 @@ If the room cannot be resolved, the plugin logs one warning and drops alerts. A 
 - It sees only errors MindRoom logs; a crash that kills the process before logging sends nothing.
 - Alerts go to a room that a running MindRoom bot can post in.
 - If the homeserver returns no event id, an alert may be retried once after a short delay (a rare duplicate is possible).
-- `mindroom plugins check` warns that the plugin imports MindRoom helpers outside the stable plugin API (redaction, message extras); re-run it after each upgrade.
+- `mindroom plugins check` warns that the plugin imports MindRoom's redaction helper outside the stable plugin API; re-run it after each upgrade.
 
 </details>
 

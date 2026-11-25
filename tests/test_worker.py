@@ -57,6 +57,23 @@ async def test_queue_draining_delivers_single_event() -> None:
     assert len(ctx.sent) == 1
     assert ctx.sent[0]["room_id"] == "!ops:localhost"
     assert "🚨 MindRoom error" in ctx.sent[0]["text"]
+    assert ctx.sent[0]["extra_content"] is None
+
+
+@pytest.mark.asyncio
+async def test_worker_inlines_stack_trace_without_extra_content() -> None:
+    ctx = _ctx()
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(extra_events=("test_burst_error",), include_stack_traces=True),
+    )
+
+    await worker._handle_record(_record(exception="Traceback\nRuntimeError: boom"))
+
+    assert len(ctx.sent) == 1
+    assert "<details><summary>Stack trace</summary>" in ctx.sent[0]["text"]
+    assert "RuntimeError: boom" in ctx.sent[0]["text"]
+    assert ctx.sent[0]["extra_content"] is None
 
 
 @pytest.mark.asyncio
@@ -393,7 +410,7 @@ async def test_errors_logged_during_send_are_dropped() -> None:
 
         # Probe in the SAME task that runs a raising _send_text to verify finally resets the ContextVar.
         ctx.send_raises = RuntimeError("502")
-        await worker._send_text("probe", None)
+        await worker._send_text("probe")
         ctx.send_raises = None
         ctx.send_result = "$event"
 
