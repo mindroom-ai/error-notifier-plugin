@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import structlog
 from conftest import remove_installed_handlers
 from error_notifier_test_import.formatter import _MAX_SUMMARY_CHARS, format_alert
 from error_notifier_test_import.log_handler import (
@@ -164,3 +165,16 @@ def test_stdlib_extra_fields_are_forwarded_and_redacted(received: list[ObservedE
     assert record.event_dict["agent"] == "voice"
     assert record.fingerprint.subkey == "provider=livekit"
     assert record.fingerprint.error_type == ""
+
+
+def test_stdlib_records_inherit_structlog_contextvars_with_extra_precedence(received: list[ObservedError]) -> None:
+    log = logging.getLogger("livekit.agents")
+    with structlog.contextvars.bound_contextvars(correlation_id="turn-1", provider="openrouter"):
+        log.error("audio track failed")
+        log.error("audio track failed", extra={"provider": "livekit"})
+
+    inherited, overridden = received
+    assert inherited.event_dict["correlation_id"] == "turn-1"
+    assert inherited.fingerprint.subkey == "provider=openrouter"
+    assert overridden.event_dict["correlation_id"] == "turn-1"
+    assert overridden.fingerprint.subkey == "provider=livekit"

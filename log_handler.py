@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any
 
+import structlog
 from mindroom.plugin_api import redact_sensitive_text
 from mindroom.redaction import redact_log_event
 
@@ -110,9 +111,12 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         if record.args:
             event_dict["error"] = record.getMessage()
             error_from_args = True
+        ctx_vars = structlog.contextvars.get_contextvars()
         for extra_key in _STDLIB_EXTRA_KEYS:
             if (extra_val := record.__dict__.get(extra_key)) is not None:
                 event_dict.setdefault(extra_key, extra_val)
+            elif (ctx_val := ctx_vars.get(extra_key)) is not None:
+                event_dict.setdefault(extra_key, ctx_val)
         exc_info = record.exc_info
     event_dict.setdefault("logger", record.name)
     event_dict.setdefault("level", record.levelname.lower())

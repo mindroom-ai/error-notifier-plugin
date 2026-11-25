@@ -477,3 +477,31 @@ async def test_run_loop_sweeps_under_continuous_traffic_and_quiet_window_resets_
     finally:
         worker.cancel()
         await worker.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_live_emit_resume_reopen_includes_occurrences_count_and_backlink() -> None:
+    clock = Clock()
+    ctx = _ctx()
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(rate_limit_seconds=10, extra_events=("test_burst_error",)),
+        deps=WorkerDeps(clock=clock),
+    )
+
+    # Open thread, resolve it, suppress 3 repeats inside window, then 4th arrival triggers EMIT_RESUME.
+    await worker._handle_record(_record(timestamp="2026-05-20T21:00:00+00:00"))
+    ctx.set_thread_resolved("!ops:localhost", "$event-1", resolved=True, set_at="2026-05-20T21:00:01+00:00")
+    for sec in ("02", "03", "04"):
+        await worker._handle_record(_record(timestamp=f"2026-05-20T21:00:{sec}+00:00"))
+    assert len(ctx.sent) == 1
+
+    clock.now = 10
+    await worker._handle_record(_record(timestamp="2026-05-20T21:00:10+00:00"))
+    assert len(ctx.sent) == 2
+    assert ctx.sent[1]["thread_id"] is None
+    assert "occurrences: 4 in last window" in ctx.sent[1]["text"]
+    assert (
+        "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24event-1)"
+        in ctx.sent[1]["text"]
+    )

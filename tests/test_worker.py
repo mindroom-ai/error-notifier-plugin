@@ -301,11 +301,19 @@ async def test_reconfigure_updates_rate_limit_without_losing_queue() -> None:
 
 @pytest.mark.asyncio
 async def test_reconfigure_changed_room_resolves_again() -> None:
+    clock = Clock()
     ctx = FakeHookContext(matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops", "#dev:localhost": "!dev"}))
-    worker = ErrorNotifierWorker(ctx, NotifierSettings(extra_events=("test_burst_error",)))
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(rate_limit_seconds=5, extra_events=("test_burst_error",)),
+        deps=WorkerDeps(clock=clock),
+    )
     await worker._handle_record(_record())
+    await worker._handle_record(_record())  # suppressed in !ops
 
-    worker.update_settings(NotifierSettings(ops_room="dev", extra_events=("test_burst_error",)))
+    worker.update_settings(NotifierSettings(ops_room="dev", rate_limit_seconds=5, extra_events=("test_burst_error",)))
+    clock.now = 5
+    await worker._emit_sweep_summaries()  # old !ops bucket cleared, must not cross into !dev
     await worker._handle_record(_record(event="agent_start_failed"))
 
     assert [item["room_id"] for item in ctx.sent] == ["!ops", "!dev"]

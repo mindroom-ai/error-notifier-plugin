@@ -107,6 +107,7 @@ class ErrorNotifierWorker:
             self._resolved_room = None
             self._resolution_attempted = False
             self._resolution_warning_emitted = False
+            self._rate_limiter = RateLimiter(settings.rate_limit_seconds, clock=self._clock)
 
     def submit(self, record: ObservedError) -> bool:
         """Queue one record without blocking, from any thread; MindRoom logs from more than one."""
@@ -199,9 +200,16 @@ class ErrorNotifierWorker:
                 await self._send_followup(room, fp, existing, record, count=count, is_rollup=is_rollup)
                 return
 
+        recent_occurrences = decision.suppressed_count + 1 if decision.kind is DecisionKind.EMIT_RESUME else None
         self._rate_limiter.reset(fp)
         self._rate_limiter.gate(fp, record)
-        await self._send_root_alert(room, record, fp, previous_thread=previous_thread)
+        await self._send_root_alert(
+            room,
+            record,
+            fp,
+            previous_thread=previous_thread,
+            recent_occurrences=recent_occurrences,
+        )
 
     async def _try_send_related_cascade(
         self, room: ResolvedOpsRoom, record: ObservedError, fp: ErrorFingerprint, corr_id: str
