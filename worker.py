@@ -9,10 +9,9 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Protocol
 
 from .formatter import (
-    extra_content_for,
     format_alert,
     format_related_alert,
     format_thread_followup,
@@ -47,8 +46,6 @@ class _SendContext(Protocol):
         text: str,
         *,
         thread_id: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        trigger_dispatch: bool = False,
     ) -> str | None:
         """Send one Matrix message."""
 
@@ -226,8 +223,7 @@ class ErrorNotifierWorker:
             return False
         self._thread_store.record_cascade_emit(entry.thread_id, fp, window)
         await self._send_text(
-            format_related_alert(record, action_for(record)),
-            extra_content_for(record, self._settings.include_stack_traces),
+            format_related_alert(record, action_for(record), include_stack_traces=self._settings.include_stack_traces),
             thread_id=entry.thread_id,
             room=room,
         )
@@ -258,8 +254,8 @@ class ErrorNotifierWorker:
                 action_for(record),
                 previous_thread=previous_thread,
                 recent_occurrences=recent_occurrences,
+                include_stack_traces=self._settings.include_stack_traces,
             ),
-            extra_content_for(record, self._settings.include_stack_traces),
             room=room,
             on_delivered=_on_delivered,
         )
@@ -284,8 +280,13 @@ class ErrorNotifierWorker:
                 self._thread_store.record(room.room_id, fp, existing.thread_id, updated_error, seen_at)
 
         await self._send_text(
-            format_thread_followup(record, count=count, is_rollup=is_rollup, last_error=existing.last_error),
-            extra_content_for(record, self._settings.include_stack_traces) if record is not None else None,
+            format_thread_followup(
+                record,
+                count=count,
+                is_rollup=is_rollup,
+                last_error=existing.last_error,
+                include_stack_traces=self._settings.include_stack_traces,
+            ),
             thread_id=existing.thread_id,
             room=room,
             on_delivered=_on_delivered,
@@ -344,7 +345,6 @@ class ErrorNotifierWorker:
     async def _send_text(
         self,
         body: str,
-        extra_content: dict[str, Any] | None,
         *,
         thread_id: str | None = None,
         room: ResolvedOpsRoom | None = None,
@@ -353,12 +353,12 @@ class ErrorNotifierWorker:
         target = room if room is not None else await self._resolve_ops_room()
         if target is None:
             return None
-        handled, event_id = await self._attempt_send(target, body, extra_content, thread_id)
+        handled, event_id = await self._attempt_send(target, body, thread_id)
         if event_id is not None and on_delivered is not None:
             on_delivered(event_id)
         if not handled:
             task = asyncio.create_task(
-                self._retry_send(target, body, extra_content, thread_id, on_delivered),
+                self._retry_send(target, body, thread_id, on_delivered),
                 name="error-notifier-retry",
             )
             _retry_tasks.add(task)
@@ -369,27 +369,22 @@ class ErrorNotifierWorker:
         self,
         room: ResolvedOpsRoom,
         body: str,
-        extra_content: dict[str, Any] | None,
         thread_id: str | None,
         on_delivered: Callable[[str], None] | None,
     ) -> None:
         await self._deps.sleep(_SEND_RETRY_BACKOFF_SECONDS)
-        handled, event_id = await self._attempt_send(room, body, extra_content, thread_id)
+        handled, event_id = await self._attempt_send(room, body, thread_id)
         if event_id is not None and on_delivered is not None:
             on_delivered(event_id)
         if not handled:
             _WARNING_LOGGER.warning("error-notifier send returned no event id for room %s", room.room_id)
 
-    async def _attempt_send(
-        self, room: ResolvedOpsRoom, body: str, extra_content: dict[str, Any] | None, thread_id: str | None
-    ) -> tuple[bool, str | None]:
+    async def _attempt_send(self, room: ResolvedOpsRoom, body: str, thread_id: str | None) -> tuple[bool, str | None]:
         """Send one message; return `(handled, event_id)` where `handled=False` requests a retry."""
         try:
             token = self._sending.set(True)
             try:
-                event_id = await self._ctx.send_message(
-                    room_id=room.room_id, text=body, thread_id=thread_id, extra_content=extra_content
-                )
+                event_id = await self._ctx.send_message(room_id=room.room_id, text=body, thread_id=thread_id)
             finally:
                 self._sending.reset(token)
         except Exception as exc:

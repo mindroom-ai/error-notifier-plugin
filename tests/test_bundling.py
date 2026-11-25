@@ -292,11 +292,8 @@ async def test_context_without_state_root_or_query_room_state_works_gracefully()
         text: str,
         *,
         thread_id: str | None = None,
-        extra_content: dict[str, object] | None = None,
-        trigger_dispatch: bool = False,
     ) -> str:
-        del trigger_dispatch
-        sent.append({"room_id": room_id, "text": text, "thread_id": thread_id, "extra_content": extra_content})
+        sent.append({"room_id": room_id, "text": text, "thread_id": thread_id})
         return f"$min-{len(sent)}"
 
     minimal_ctx = SimpleNamespace(
@@ -388,7 +385,7 @@ async def test_correlation_cascade_across_turns_and_immediate_standalone_seconda
     assert ctx.sent[0]["thread_id"] is None
     assert ctx.sent[1]["thread_id"] == "$event-1"
     assert "🔗 Related error (same turn) — mindroom.ai (openrouter): ProviderUnavailable" in ctx.sent[1]["text"]
-    assert ctx.sent[1]["extra_content"] is not None
+    assert "<details><summary>Stack trace</summary>" in ctx.sent[1]["text"]
 
     # Turn 2 (t=2, inside A's backoff window): A hits SUPPRESS yet records turn-2 -> $event-1;
     # B is throttled in $event-1 (no duplicate 🔗 AND no orphan top-level root for B!).

@@ -6,16 +6,12 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import quote
 
-from mindroom.matrix.message_extras import (
-    MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS,
-    MatrixMessageExtra,
-    build_message_extras_content,
-)
-
 from .models import ObservedError, non_empty_str, parse_traceback_tail
 
 _FRAME_PATH_RE = re.compile(r'^File "([^"]+)"')
+_BACKTICK_RUN_RE = re.compile(r"`+")
 _MAX_SUMMARY_CHARS = 300
+_MAX_STACK_TRACE_CHARS = 16 * 1024
 _MARKDOWN_ESCAPES = str.maketrans({char: f"\\{char}" for char in r"\*_[]()#`"})
 
 
@@ -25,6 +21,7 @@ def format_alert(
     *,
     previous_thread: tuple[str, str] | None = None,
     recent_occurrences: int | None = None,
+    include_stack_traces: bool = False,
 ) -> str:
     """Format one top-level root alert body."""
     component, headline = _title_parts(record)
@@ -35,6 +32,8 @@ def format_alert(
         room_id, prev_thread_id = previous_thread
         url = f"https://matrix.to/#/{quote(room_id, safe='')}/{quote(prev_thread_id, safe='')}"
         lines.append(f"reoccurred: [previous resolved thread]({url})")
+    if include_stack_traces and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
     return "\n".join(lines)
 
 
@@ -44,6 +43,7 @@ def format_thread_followup(
     count: int = 1,
     is_rollup: bool = False,
     last_error: str | None = None,
+    include_stack_traces: bool = False,
 ) -> str:
     """Format one compact in-thread follow-up or rollup reply."""
     latest_ts = timestamp_for(record)
@@ -56,23 +56,29 @@ def format_thread_followup(
     new_error = raw_error_text(record) if record is not None else None
     if new_error and (not last_error or new_error != last_error):
         lines.extend(_format_error_lines(_escape_markdown(new_error)))
+    if include_stack_traces and record is not None and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
     return "\n".join(lines)
 
 
-def format_related_alert(record: ObservedError, action: str | None) -> str:
+def format_related_alert(
+    record: ObservedError,
+    action: str | None,
+    *,
+    include_stack_traces: bool = False,
+) -> str:
     """Format one same-turn related cascade error reply."""
     component, headline = _title_parts(record)
-    return "\n".join([f"🔗 Related error (same turn) — {component}: {headline}", *_detail_lines(record, action)])
+    lines = [f"🔗 Related error (same turn) — {component}: {headline}", *_detail_lines(record, action)]
+    if include_stack_traces and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
+    return "\n".join(lines)
 
 
-def extra_content_for(record: ObservedError, include_stack_traces: bool) -> dict[str, object] | None:
-    """Build collapsed traceback extras when stack traces are enabled."""
-    if not include_stack_traces or not record.exception:
-        return None
-    content = record.exception[:MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS]
-    return build_message_extras_content(
-        [MatrixMessageExtra(title="Stack trace", content=content, content_type="text/markdown", collapsed=True)],
-    )
+def _format_stack_trace(exception: str) -> str:
+    bounded = _cap(exception.rstrip("\r\n"), _MAX_STACK_TRACE_CHARS)
+    fence = "`" * max(3, 1 + max(map(len, _BACKTICK_RUN_RE.findall(bounded)), default=0))
+    return f"<details><summary>Stack trace</summary>\n\n{fence}\n{bounded}\n{fence}\n\n</details>"
 
 
 def timestamp_for(record: ObservedError | None) -> str:

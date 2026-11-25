@@ -8,14 +8,13 @@ import traceback
 
 import pytest
 from error_notifier_test_import.formatter import (
-    extra_content_for,
+    _MAX_STACK_TRACE_CHARS,
     format_alert,
     format_related_alert,
     format_thread_followup,
     traceback_summary,
 )
 from error_notifier_test_import.models import ErrorFingerprint, ObservedError
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 
 
 def _record(**overrides: object) -> ObservedError:
@@ -97,19 +96,48 @@ def test_unknown_action_is_omitted() -> None:
     assert "\naction:" not in body
 
 
-def test_stack_trace_extras_populated_when_enabled() -> None:
-    extras = extra_content_for(_record(exception="Traceback\nRuntimeError: boom"), True)
+def test_stack_trace_included_inline_when_enabled() -> None:
+    body = format_alert(_record(exception="Traceback\nRuntimeError: boom\n"), None, include_stack_traces=True)
 
-    assert extras is not None
-    assert extras[MINDROOM_MESSAGE_EXTRAS_KEY]["sections"][0]["title"] == "Stack trace"
-
-
-def test_stack_trace_extras_absent_when_disabled() -> None:
-    assert extra_content_for(_record(exception="Traceback\nRuntimeError: boom"), False) is None
+    assert body.endswith(
+        "\n\n<details><summary>Stack trace</summary>\n\n```\nTraceback\nRuntimeError: boom\n```\n\n</details>",
+    )
 
 
-def test_stack_trace_extras_absent_without_exception() -> None:
-    assert extra_content_for(_record(exception=None), True) is None
+def test_stack_trace_omitted_when_disabled_or_missing() -> None:
+    assert "<details>" not in format_alert(
+        _record(exception="Traceback\nRuntimeError: boom"), None, include_stack_traces=False
+    )
+    assert "<details>" not in format_alert(_record(exception=None), None, include_stack_traces=True)
+    assert "<details>" not in format_alert(_record(exception="  \n"), None, include_stack_traces=True)
+
+
+def test_stack_trace_truncates_at_cap() -> None:
+    exact = "x" * _MAX_STACK_TRACE_CHARS
+    exact_body = format_alert(_record(exception=f"{exact}\n"), None, include_stack_traces=True)
+    assert f"```\n{exact}\n```" in exact_body
+
+    over = "y" * (_MAX_STACK_TRACE_CHARS + 50)
+    over_body = format_alert(_record(exception=over), None, include_stack_traces=True)
+    expected = f"{'y' * (_MAX_STACK_TRACE_CHARS - 1)}…"
+    assert f"```\n{expected}\n```" in over_body
+
+
+@pytest.mark.parametrize(
+    ("exception_text", "expected_fence"),
+    [
+        ("ValueError: bad `arg` and ``pair``", "```"),
+        ("RuntimeError: ```\n</details>\n```", "````"),
+        ("RuntimeError: `````five`````", "``````"),
+    ],
+)
+def test_stack_trace_picks_fence_longer_than_inner_backticks(exception_text: str, expected_fence: str) -> None:
+    body = format_alert(_record(exception=exception_text), None, include_stack_traces=True)
+
+    assert body.endswith(
+        f"\n\n<details><summary>Stack trace</summary>\n\n"
+        f"{expected_fence}\n{exception_text}\n{expected_fence}\n\n</details>",
+    )
 
 
 def test_thread_followup_formats_rollup_and_recurrence_and_deduplicates_error() -> None:
