@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import traceback
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from error_notifier_test_import.formatter import (
     _MAX_STACK_TRACE_CHARS,
     _code_span,
+    _is_mindroom_frame,
     format_alert,
     format_related_alert,
     format_thread_followup,
@@ -296,6 +300,38 @@ def test_traceback_matches_mindroom_in_site_packages_and_falls_back_when_absent(
 
 
 @pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/home/runner/work/mindroom/mindroom/plugin/tests/test_formatter.py", False),
+        ("/home/mindroom/plugins/custom/tools.py", False),
+        ("/srv/mindroom/tests/test_ai.py", False),
+        ("/srv/mindroom/plugins/error-notifier/formatter.py", False),
+        ("src/mindroom/ai.py", True),
+        ("/srv/mindroom/src/mindroom/ai.py", True),
+        ("/srv/mindroom/.venv/lib/python3.13/site-packages/mindroom/hooks.py", True),
+        ("/usr/lib/python3/dist-packages/mindroom/hooks.py", True),
+    ],
+)
+def test_is_mindroom_frame_matches_only_package_paths(path: str, expected: bool) -> None:
+    assert _is_mindroom_frame(f'File "{path}", line 12, in run') is expected
+
+
+def test_is_mindroom_frame_matches_loaded_package_root_and_rejects_siblings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pkg_dir = tmp_path / "custom_pkg"
+    pkg_dir.mkdir()
+    link_dir = tmp_path / "pkg_link"
+    link_dir.symlink_to(pkg_dir)
+    monkeypatch.setitem(sys.modules, "mindroom", SimpleNamespace(__file__=str(link_dir / "__init__.py")))
+
+    assert _is_mindroom_frame(f'File "{link_dir / "ai.py"}", line 7, in run') is True
+    assert _is_mindroom_frame(f'File "{pkg_dir.resolve() / "ai.py"}", line 7, in run') is True
+    assert _is_mindroom_frame(f'File "{tmp_path / "pkg_link_data" / "ai.py"}", line 7, in run') is False
+    assert _is_mindroom_frame(f'File "{tmp_path / "custom_pkg_data" / "ai.py"}", line 7, in run') is False
+
+
+@pytest.mark.parametrize(
     ("tail", "expected"),
     [
         (
@@ -354,6 +390,19 @@ def test_syntax_error_traceback_shows_exception_and_file_line() -> None:
 
     assert "error:   SyntaxError: invalid syntax\n" in body
     assert 'File "/app/bad.py", line 1' in body
+
+
+def test_syntax_error_from_mindroom_caller_keeps_syntax_error_frame() -> None:
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/srv/mindroom/src/mindroom/tool_system/plugins.py", line 123, in load_plugin\n'
+        '    compile(source, "/app/bad.py", "exec")\n'
+        '  File "/app/bad.py", line 1\n'
+        "    def bad(:\n"
+        "            ^\n"
+        "SyntaxError: invalid syntax\n"
+    )
+    assert traceback_summary(tb) == 'SyntaxError: invalid syntax\nFile "/app/bad.py", line 1'
 
 
 def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
