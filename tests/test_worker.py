@@ -56,7 +56,8 @@ async def test_queue_draining_delivers_single_event() -> None:
 
     assert len(ctx.sent) == 1
     assert ctx.sent[0]["room_id"] == "!ops:localhost"
-    assert "🚨 MindRoom error" in ctx.sent[0]["text"]
+    assert r"🚨 `mindroom.orchestrator`: test\_burst\_error" in ctx.sent[0]["text"]
+    assert ctx.sent[0]["thread_id"] is None
 
 
 @pytest.mark.asyncio
@@ -131,7 +132,8 @@ async def test_periodic_sweep_emits_suppression_after_quiet_window() -> None:
     await worker._emit_sweep_summaries()
 
     assert len(ctx.sent) == 2
-    assert "suppressed 1 further occurrences" in ctx.sent[1]["text"]
+    assert ctx.sent[1]["thread_id"] == "$event-1"
+    assert "🔁 +1 occurrence (latest:" in ctx.sent[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -149,8 +151,9 @@ async def test_fresh_event_after_suppression_emits_summary_then_alert() -> None:
 
     await worker._handle_record(_record())
 
-    assert "suppressed 1 further occurrences" in ctx.sent[1]["text"]
-    assert "🚨 MindRoom error" in ctx.sent[2]["text"]
+    assert len(ctx.sent) == 2
+    assert ctx.sent[1]["thread_id"] == "$event-1"
+    assert "🔁 +2 occurrences (latest:" in ctx.sent[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -307,16 +310,25 @@ async def test_reconfigure_updates_rate_limit_without_losing_queue() -> None:
 
     await worker._emit_sweep_summaries()
 
-    assert "suppressed 1 further occurrences" in ctx.sent[1]["text"]
+    assert ctx.sent[1]["thread_id"] == "$event-1"
+    assert "🔁 +1 occurrence (latest:" in ctx.sent[1]["text"]
 
 
 @pytest.mark.asyncio
 async def test_reconfigure_changed_room_resolves_again() -> None:
+    clock = Clock()
     ctx = FakeHookContext(matrix_admin=FakeMatrixAdmin({"#ops:localhost": "!ops", "#dev:localhost": "!dev"}))
-    worker = ErrorNotifierWorker(ctx, NotifierSettings(extra_events=("test_burst_error",)))
+    worker = ErrorNotifierWorker(
+        ctx,
+        NotifierSettings(rate_limit_seconds=5, extra_events=("test_burst_error",)),
+        deps=WorkerDeps(clock=clock),
+    )
     await worker._handle_record(_record())
+    await worker._handle_record(_record())  # suppressed in !ops
 
-    worker.update_settings(NotifierSettings(ops_room="dev", extra_events=("test_burst_error",)))
+    worker.update_settings(NotifierSettings(ops_room="dev", rate_limit_seconds=5, extra_events=("test_burst_error",)))
+    clock.now = 5
+    await worker._emit_sweep_summaries()  # old !ops bucket cleared, must not cross into !dev
     await worker._handle_record(_record(event="agent_start_failed"))
 
     assert [item["room_id"] for item in ctx.sent] == ["!ops", "!dev"]

@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import structlog
 from conftest import remove_installed_handlers
 from error_notifier_test_import.formatter import _MAX_SUMMARY_CHARS, format_alert
 from error_notifier_test_import.log_handler import (
@@ -131,5 +132,66 @@ def test_long_exception_summarized_before_truncation(received: list[ObservedErro
     )
     observed = observed_error_from_record(raw)
     assert observed.exception_summary is not None and len(observed.exception_summary) <= _MAX_SUMMARY_CHARS
-    assert "error:  ValueError: YYY" in format_alert(observed, None)
+    assert "error:   ValueError: YYY" in format_alert(observed, None)
     assert 'File "/app/client.py", line 9, in send' in format_alert(observed, None)
+
+
+def test_stdlib_percent_args_do_not_leak_into_error_type(received: list[ObservedError]) -> None:
+    log = logging.getLogger("mindroom.matrix.users")
+    log.error("%s: sync failed", "WorkerA")
+    log.error("%s: sync failed", "WorkerB")
+    get_logger("mindroom.ai").error("provider_failed", error="ProviderUnavailable('Connection error.')")
+
+    first, second, third = received
+    assert first.error_from_args and second.error_from_args
+    assert first.fingerprint == second.fingerprint
+    assert first.fingerprint.error_type == ""
+    assert not third.error_from_args
+    assert third.fingerprint.error_type == "ProviderUnavailable"
+
+
+def test_stdlib_extra_fields_are_forwarded_and_redacted(received: list[ObservedError]) -> None:
+    log = logging.getLogger("livekit.agents")
+    log.error(
+        "room join failed: %s",
+        "WorkerA",
+        extra={
+            "correlation_id": "turn-42",
+            "room_id": "!room:localhost",
+            "thread_id": "$thread-1",
+            "provider": "livekit",
+            "agent": "voice",
+        },
+    )
+
+    [record] = received
+    assert record.event == "room join failed: %s"
+    assert record.error_from_args
+    assert record.event_dict["correlation_id"] == "turn-42"
+    assert record.event_dict["room_id"] == "!room:localhost"
+    assert record.event_dict["thread_id"] == "$thread-1"
+    assert record.event_dict["agent"] == "voice"
+    assert record.fingerprint.subkey == "provider=livekit"
+    assert record.fingerprint.error_type == ""
+
+
+def test_stdlib_records_inherit_structlog_contextvars_with_extra_precedence(received: list[ObservedError]) -> None:
+    log = logging.getLogger("livekit.agents")
+    with structlog.contextvars.bound_contextvars(
+        correlation_id="turn-1",
+        room_id="!room:localhost",
+        thread_id="$thread-9",
+        provider="openrouter",
+    ):
+        log.error("audio track failed")
+        log.error("audio track failed", extra={"provider": "livekit"})
+
+    inherited, overridden = received
+    assert inherited.event_dict["correlation_id"] == "turn-1"
+    assert inherited.event_dict["room_id"] == "!room:localhost"
+    assert inherited.event_dict["thread_id"] == "$thread-9"
+    assert inherited.fingerprint.subkey == "provider=openrouter"
+    assert overridden.event_dict["correlation_id"] == "turn-1"
+    assert overridden.event_dict["room_id"] == "!room:localhost"
+    assert overridden.event_dict["thread_id"] == "$thread-9"
+    assert overridden.fingerprint.subkey == "provider=livekit"

@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any
 
+import structlog
 from mindroom.plugin_api import redact_sensitive_text
 from mindroom.redaction import redact_log_event
 
@@ -28,6 +29,19 @@ _MAX_EXCEPTION_CHARS = 8192
 _TRUNCATION_HEAD_CHARS = 2048
 _TRUNCATION_MARKER = "\n…\n"
 _SENDING_ALERT: ContextVar[bool] = ContextVar("mindroom_error_notifier_sending", default=False)
+_STDLIB_EXTRA_KEYS = (
+    "plugin_name",
+    "hook_name",
+    "tool_name",
+    "tool",
+    "provider",
+    "agent",
+    "correlation_id",
+    "room_id",
+    "thread_id",
+    "error_type",
+    "exception_type",
+)
 
 _ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
 
@@ -88,6 +102,7 @@ def installed_sending_var() -> ContextVar[bool]:
 
 def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
     """Build a redacted snapshot of one log record."""
+    error_from_args = False
     if isinstance(record.msg, dict):
         # structlog's `wrap_for_formatter` hands the event dict to stdlib logging as the message.
         event_dict: dict[str, Any] = dict(record.msg)
@@ -97,6 +112,13 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         event_dict = {"event": str(record.msg)}
         if record.args:
             event_dict["error"] = record.getMessage()
+            error_from_args = True
+        ctx_vars = structlog.contextvars.get_contextvars()
+        for extra_key in _STDLIB_EXTRA_KEYS:
+            if (extra_val := record.__dict__.get(extra_key)) is not None:
+                event_dict.setdefault(extra_key, extra_val)
+            elif (ctx_val := ctx_vars.get(extra_key)) is not None:
+                event_dict.setdefault(extra_key, ctx_val)
         exc_info = record.exc_info
     event_dict.setdefault("logger", record.name)
     event_dict.setdefault("level", record.levelname.lower())
@@ -114,6 +136,7 @@ def observed_error_from_record(record: logging.LogRecord) -> ObservedError:
         event_dict=redacted,
         exception=None if full_exception is None else _truncate(full_exception),
         exception_summary=None if full_exception is None else traceback_summary(full_exception),
+        error_from_args=error_from_args,
     )
 
 

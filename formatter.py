@@ -4,56 +4,75 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from urllib.parse import quote
 
-from .models import ObservedError
+from .models import ObservedError, non_empty_str, parse_traceback_tail
 
-_FRAME_RE = re.compile(r'^\s*(File "[^"]+", line \d+(?:, in .+)?)$')
-_GUTTER_RE = re.compile(r"^(?:[ ]+\|)+(?: |$)")
+_FRAME_PATH_RE = re.compile(r'^File "([^"]+)"')
 _BACKTICK_RUN_RE = re.compile(r"`+")
-_BORDER_CHARS = frozenset(" +-0123456789")
-_CHAIN_MARKERS = (
-    "Traceback (most recent call last):",
-    "+ Exception Group Traceback (most recent call last):",
-    "Exception Group Traceback (most recent call last):",
-    "During handling of the above exception,",
-    "The above exception was the direct cause",
-)
 _MAX_SUMMARY_CHARS = 300
 _MAX_STACK_TRACE_CHARS = 16 * 1024
+_MARKDOWN_ESCAPES = str.maketrans({char: f"\\{char}" for char in r"\*_[]()#`"})
 
 
 def format_alert(
     record: ObservedError,
     action: str | None,
     *,
+    previous_thread: tuple[str, str] | None = None,
+    recent_occurrences: int | None = None,
     include_stack_traces: bool = False,
 ) -> str:
-    """Format one alert body."""
-    lines = [
-        f"🚨 MindRoom error — {_timestamp(record)}",
-        f"logger: {record.logger}",
-        f"event:  {record.event}",
-    ]
-    error_text = _display_error(record)
-    if error_text:
-        lines.extend(_format_error_lines(error_text))
-    if action:
-        lines.append(f"action: {action}")
+    """Format one top-level root alert body."""
+    component, headline = _title_parts(record)
+    lines = [f"🚨 {component}: {headline}", f"time:    {timestamp_for(record)}", *_detail_lines(record, action)]
+    if recent_occurrences is not None and recent_occurrences > 1:
+        lines.append(f"occurrences: {recent_occurrences} in last window")
+    if previous_thread is not None:
+        room_id, prev_thread_id = previous_thread
+        url = f"https://matrix.to/#/{quote(room_id, safe='')}/{quote(prev_thread_id, safe='')}"
+        lines.append(f"reoccurred: [previous resolved thread]({url})")
     if include_stack_traces and record.exception and record.exception.strip():
         lines.extend(("", _format_stack_trace(record.exception)))
     return "\n".join(lines)
 
 
-def format_suppression_summary(key: tuple[str, str], count: int) -> str:
-    """Format a suppression summary body."""
-    logger_name, event = key
-    return "\n".join(
-        [
-            f"🔕 MindRoom error — suppressed {count} further occurrences of:",
-            f"logger: {logger_name}",
-            f"event:  {event}",
-        ],
-    )
+def format_thread_followup(
+    record: ObservedError | None,
+    *,
+    count: int = 1,
+    is_rollup: bool = False,
+    last_error: str | None = None,
+    include_stack_traces: bool = False,
+) -> str:
+    """Format one compact in-thread follow-up or rollup reply."""
+    latest_ts = timestamp_for(record)
+    if is_rollup or count > 1:
+        noun = "occurrence" if count == 1 else "occurrences"
+        header = f"🔁 +{count} {noun} (latest: {latest_ts})"
+    else:
+        header = f"🔁 Recurred — {latest_ts}"
+    lines = [header]
+    new_error = raw_error_text(record) if record is not None else None
+    if new_error and (not last_error or new_error != last_error):
+        lines.extend(_format_error_lines(_escape_markdown(new_error)))
+    if include_stack_traces and record is not None and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
+    return "\n".join(lines)
+
+
+def format_related_alert(
+    record: ObservedError,
+    action: str | None,
+    *,
+    include_stack_traces: bool = False,
+) -> str:
+    """Format one same-turn related cascade error reply."""
+    component, headline = _title_parts(record)
+    lines = [f"🔗 Related error (same turn) — {component}: {headline}", *_detail_lines(record, action)]
+    if include_stack_traces and record.exception and record.exception.strip():
+        lines.extend(("", _format_stack_trace(record.exception)))
+    return "\n".join(lines)
 
 
 def _format_stack_trace(exception: str) -> str:
@@ -62,42 +81,26 @@ def _format_stack_trace(exception: str) -> str:
     return f"<details><summary>Stack trace</summary>\n\n{fence}\n{bounded}\n{fence}\n\n</details>"
 
 
-def _timestamp(record: ObservedError) -> str:
-    if record.timestamp:
-        return record.timestamp
-    return datetime.now(UTC).isoformat()
+def timestamp_for(record: ObservedError | None) -> str:
+    """Return the record timestamp or current UTC ISO timestamp."""
+    return record.timestamp if record is not None and record.timestamp else datetime.now(UTC).isoformat()
 
 
-def _display_error(record: ObservedError) -> str | None:
-    error = record.event_dict.get("error")
-    if error is not None:
-        return _escape_markdown_text(str(error))
-    if record.exception_summary:
-        return _escape_markdown_text(record.exception_summary)
-    return None
-
-
-def _is_border(line: str) -> bool:
-    stripped = line.lstrip(" |").rstrip()
-    return stripped.startswith("+-") and "---" in stripped and set(stripped) <= _BORDER_CHARS
+def raw_error_text(record: ObservedError) -> str | None:
+    """Return the unescaped display error text for one record, if available."""
+    if (error := record.event_dict.get("error")) is not None and (text := str(error)):
+        return text
+    return record.exception_summary or None
 
 
 def traceback_summary(exception: str) -> str | None:
-    """Return a short summary (final exception line and raising frame) of a traceback."""
-    lines = [
-        cleaned
-        for raw in exception.splitlines()
-        if (cleaned := _GUTTER_RE.sub("", raw)).strip() and not _is_border(raw)
-    ]
-    if not lines:
+    """Return a short summary (final exception line and preferred frame) of a traceback."""
+    frames, exc_line, section = parse_traceback_tail(exception)
+    if not section:
         return None
-    start = max((i + 1 for i, line in enumerate(lines) if line.strip().startswith(_CHAIN_MARKERS)), default=0)
-    section = lines[start:] or lines
-    frames = [(i, match.group(1)) for i, line in enumerate(section) if (match := _FRAME_RE.match(line))]
     if not frames:
         return _cap(section[0].strip(), _MAX_SUMMARY_CHARS)
-    frame_idx, frame = frames[-1]
-    exc_line = next((line.strip() for line in section[frame_idx + 1 :] if not line[0].isspace()), None)
+    frame = next((candidate for _, candidate in reversed(frames) if _is_mindroom_frame(candidate)), frames[-1][1])
     if not exc_line:
         return _cap(frame, _MAX_SUMMARY_CHARS)
     budget = _MAX_SUMMARY_CHARS - len(frame) - 1
@@ -106,27 +109,72 @@ def traceback_summary(exception: str) -> str | None:
     return _cap(f"{exc_line}\n{frame}", _MAX_SUMMARY_CHARS)
 
 
+def _is_mindroom_frame(frame: str) -> bool:
+    match = _FRAME_PATH_RE.match(frame)
+    if match is None:
+        return False
+    path = match.group(1).replace("\\", "/")
+    for pkg_marker in ("/site-packages/", "/dist-packages/"):
+        if pkg_marker in path:
+            return path.rsplit(pkg_marker, 1)[1].startswith("mindroom/")
+    if "/.venv/" in path or "/python3." in path:
+        return False
+    return "/mindroom/" in path or path.startswith("mindroom/")
+
+
+def _escape_markdown(text: str) -> str:
+    return text.translate(_MARKDOWN_ESCAPES)
+
+
+def _code_span(value: str) -> str:
+    text = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    fence = "`" * (1 + max(map(len, _BACKTICK_RUN_RE.findall(text)), default=0))
+    needs_pad = (
+        text.startswith("`")
+        or text.endswith("`")
+        or (text.startswith(" ") and text.endswith(" ") and bool(text.strip(" ")))
+    )
+    return f"{fence} {text} {fence}" if needs_pad else f"{fence}{text}{fence}"
+
+
+def _title_parts(record: ObservedError) -> tuple[str, str]:
+    fp = record.fingerprint
+    subkey_display = ", ".join(part.split("=", 1)[-1] for part in fp.subkey.split(",")) if fp.subkey else ""
+    component = _code_span(f"{record.logger} ({subkey_display})" if subkey_display else record.logger)
+    if fp.error_type:
+        headline = _code_span(fp.error_type.rsplit(".", 1)[-1] or fp.error_type)
+    else:
+        headline = _escape_markdown(record.event)
+    return component, headline
+
+
+def _detail_lines(record: ObservedError, action: str | None) -> list[str]:
+    lines = [f"logger:  {record.logger}", f"event:   {record.event}"]
+    if context_line := _format_context(record):
+        lines.append(f"context: {context_line}")
+    if raw_error := raw_error_text(record):
+        lines.extend(_format_error_lines(_escape_markdown(raw_error)))
+    if action:
+        lines.append(f"action:  {action}")
+    return lines
+
+
+def _format_context(record: ObservedError) -> str:
+    event_dict = record.event_dict
+    fields = (
+        ("plugin", non_empty_str(event_dict.get("plugin_name"))),
+        ("hook", non_empty_str(event_dict.get("hook_name"))),
+        ("tool", non_empty_str(event_dict.get("tool_name")) or non_empty_str(event_dict.get("tool"))),
+        ("provider", non_empty_str(event_dict.get("provider"))),
+        ("agent", non_empty_str(event_dict.get("agent"))),
+    )
+    return " ".join(_code_span(f"{label}={value}") for label, value in fields if value)
+
+
 def _cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
 def _format_error_lines(error_text: str) -> list[str]:
     first, *rest = error_text.splitlines()
-    lines = [f"error:  {first}"]
-    lines.extend(f"        {line}" for line in rest)
-    return lines
-
-
-def _escape_markdown_text(value: str) -> str:
-    replacements = {
-        "\\": "\\\\",
-        "*": "\\*",
-        "_": "\\_",
-        "[": "\\[",
-        "]": "\\]",
-        "(": "\\(",
-        ")": "\\)",
-        "#": "\\#",
-        "`": "\\`",
-    }
-    return "".join(replacements.get(char, char) for char in value)
+    return [f"error:   {first}", *(f"         {line}" for line in rest)]
