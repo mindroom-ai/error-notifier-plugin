@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import quote
 
 from .models import ObservedError, non_empty_str, parse_traceback_tail
 
 _FRAME_PATH_RE = re.compile(r'^File "([^"]+)"')
+_SYNTAX_ERROR_FRAME_RE = re.compile(r'^File "[^"]+", line \d+$')
 _BACKTICK_RUN_RE = re.compile(r"`+")
 _MAX_SUMMARY_CHARS = 300
 _MAX_STACK_TRACE_CHARS = 16 * 1024
@@ -100,13 +103,30 @@ def traceback_summary(exception: str) -> str | None:
         return None
     if not frames:
         return _cap(section[0].strip(), _MAX_SUMMARY_CHARS)
-    frame = next((candidate for _, candidate in reversed(frames) if _is_mindroom_frame(candidate)), frames[-1][1])
+    last_frame = frames[-1][1]
+    if _SYNTAX_ERROR_FRAME_RE.match(last_frame):
+        frame = last_frame
+    else:
+        frame = next((candidate for _, candidate in reversed(frames) if _is_mindroom_frame(candidate)), last_frame)
     if not exc_line:
         return _cap(frame, _MAX_SUMMARY_CHARS)
     budget = _MAX_SUMMARY_CHARS - len(frame) - 1
     if budget >= 40:
         return f"{_cap(exc_line, budget)}\n{frame}"
     return _cap(f"{exc_line}\n{frame}", _MAX_SUMMARY_CHARS)
+
+
+def _mindroom_package_roots() -> tuple[str, ...]:
+    module_file = getattr(sys.modules.get("mindroom"), "__file__", None)
+    if not isinstance(module_file, str) or not module_file.strip():
+        return ()
+    parent = Path(module_file).parent
+    roots = [parent.as_posix().rstrip("/")]
+    try:
+        roots.append(parent.resolve().as_posix().rstrip("/"))
+    except (OSError, RuntimeError):
+        pass
+    return tuple(dict.fromkeys(root for root in roots if root))
 
 
 def _is_mindroom_frame(frame: str) -> bool:
@@ -119,7 +139,9 @@ def _is_mindroom_frame(frame: str) -> bool:
             return path.rsplit(pkg_marker, 1)[1].startswith("mindroom/")
     if "/.venv/" in path or "/python3." in path:
         return False
-    return "/mindroom/" in path or path.startswith("mindroom/")
+    if "/src/mindroom/" in path or path.startswith("src/mindroom/"):
+        return True
+    return any(path.startswith(f"{root}/") for root in _mindroom_package_roots())
 
 
 def _escape_markdown(text: str) -> str:
