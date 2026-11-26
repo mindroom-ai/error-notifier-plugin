@@ -155,13 +155,21 @@ def test_stdlib_extra_fields_are_forwarded_and_redacted(received: list[ObservedE
     log.error(
         "room join failed: %s",
         "WorkerA",
-        extra={"correlation_id": "turn-42", "provider": "livekit", "agent": "voice"},
+        extra={
+            "correlation_id": "turn-42",
+            "room_id": "!room:localhost",
+            "thread_id": "$thread-1",
+            "provider": "livekit",
+            "agent": "voice",
+        },
     )
 
     [record] = received
     assert record.event == "room join failed: %s"
     assert record.error_from_args
     assert record.event_dict["correlation_id"] == "turn-42"
+    assert record.event_dict["room_id"] == "!room:localhost"
+    assert record.event_dict["thread_id"] == "$thread-1"
     assert record.event_dict["agent"] == "voice"
     assert record.fingerprint.subkey == "provider=livekit"
     assert record.fingerprint.error_type == ""
@@ -169,12 +177,21 @@ def test_stdlib_extra_fields_are_forwarded_and_redacted(received: list[ObservedE
 
 def test_stdlib_records_inherit_structlog_contextvars_with_extra_precedence(received: list[ObservedError]) -> None:
     log = logging.getLogger("livekit.agents")
-    with structlog.contextvars.bound_contextvars(correlation_id="turn-1", provider="openrouter"):
+    with structlog.contextvars.bound_contextvars(
+        correlation_id="turn-1",
+        room_id="!room:localhost",
+        thread_id="$thread-9",
+        provider="openrouter",
+    ):
         log.error("audio track failed")
         log.error("audio track failed", extra={"provider": "livekit"})
 
     inherited, overridden = received
     assert inherited.event_dict["correlation_id"] == "turn-1"
+    assert inherited.event_dict["room_id"] == "!room:localhost"
+    assert inherited.event_dict["thread_id"] == "$thread-9"
     assert inherited.fingerprint.subkey == "provider=openrouter"
     assert overridden.event_dict["correlation_id"] == "turn-1"
+    assert overridden.event_dict["room_id"] == "!room:localhost"
+    assert overridden.event_dict["thread_id"] == "$thread-9"
     assert overridden.fingerprint.subkey == "provider=livekit"

@@ -36,7 +36,7 @@ class CorrelationEntry:
 
     thread_id: str
     primary_fingerprint: ErrorFingerprint
-    recorded_at: float
+    expires_at: float
 
 
 class ThreadStore:
@@ -87,7 +87,12 @@ class ThreadStore:
         return entry
 
     def record_correlation(
-        self, room_id: str, corr_id: str | None, thread_id: str, primary_fingerprint: ErrorFingerprint
+        self,
+        room_id: str,
+        corr_id: str | None,
+        thread_id: str,
+        primary_fingerprint: ErrorFingerprint,
+        ttl_seconds: float = CORRELATION_TTL_SECONDS,
     ) -> None:
         """Record or refresh a same-turn correlation mapping."""
         if not corr_id:
@@ -95,11 +100,8 @@ class ThreadStore:
         now = self._clock()
         self._prune_correlations(now)
         key = (room_id, corr_id)
-        prev = self._correlations.pop(key, None)
-        if prev is None or prev.primary_fingerprint == primary_fingerprint:
-            self._correlations[key] = CorrelationEntry(thread_id, primary_fingerprint, now)
-        else:
-            self._correlations[key] = CorrelationEntry(prev.thread_id, prev.primary_fingerprint, now)
+        self._correlations.pop(key, None)
+        self._correlations[key] = CorrelationEntry(thread_id, primary_fingerprint, now + ttl_seconds)
         while len(self._correlations) > CORRELATION_MAX_ENTRIES:
             self._correlations.pop(next(iter(self._correlations)))
 
@@ -132,7 +134,7 @@ class ThreadStore:
             self._cascade_emits.pop(next(iter(self._cascade_emits)))
 
     def _prune_correlations(self, now: float) -> None:
-        for key in [k for k, e in self._correlations.items() if now - e.recorded_at >= CORRELATION_TTL_SECONDS]:
+        for key in [k for k, e in self._correlations.items() if now >= e.expires_at]:
             self._correlations.pop(key, None)
 
     def _prune_cascade_emits(self, now: float, window_seconds: int) -> None:

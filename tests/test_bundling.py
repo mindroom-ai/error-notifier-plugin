@@ -101,9 +101,9 @@ async def test_distinct_fingerprints_open_separate_threads() -> None:
 
     assert len(ctx.sent) == 3
     assert [msg["thread_id"] for msg in ctx.sent] == [None, None, None]
-    assert "mindroom.hooks (p1): TimeoutError" in ctx.sent[0]["text"]
-    assert "mindroom.hooks (p2): TimeoutError" in ctx.sent[1]["text"]
-    assert "mindroom.hooks (p1): ValueError" in ctx.sent[2]["text"]
+    assert "`mindroom.hooks (p1)`: `TimeoutError`" in ctx.sent[0]["text"]
+    assert "`mindroom.hooks (p2)`: `TimeoutError`" in ctx.sent[1]["text"]
+    assert "`mindroom.hooks (p1)`: `ValueError`" in ctx.sent[2]["text"]
 
 
 @pytest.mark.asyncio
@@ -384,7 +384,7 @@ async def test_correlation_cascade_across_turns_and_immediate_standalone_seconda
     assert len(ctx.sent) == 2
     assert ctx.sent[0]["thread_id"] is None
     assert ctx.sent[1]["thread_id"] == "$event-1"
-    assert "🔗 Related error (same turn) — mindroom.ai (openrouter): ProviderUnavailable" in ctx.sent[1]["text"]
+    assert "🔗 Related error (same turn) — `mindroom.ai (openrouter)`: `ProviderUnavailable`" in ctx.sent[1]["text"]
     assert "<details><summary>Stack trace</summary>" in ctx.sent[1]["text"]
 
     # Turn 2 (t=2, inside A's backoff window): A hits SUPPRESS yet records turn-2 -> $event-1;
@@ -408,7 +408,7 @@ async def test_correlation_cascade_across_turns_and_immediate_standalone_seconda
     await worker._handle_record(_secondary(None))
     assert len(ctx.sent) == 5
     assert ctx.sent[4]["thread_id"] is None
-    assert "🚨 mindroom.ai (openrouter): ProviderUnavailable" in ctx.sent[4]["text"]
+    assert "🚨 `mindroom.ai (openrouter)`: `ProviderUnavailable`" in ctx.sent[4]["text"]
 
     # Expired correlation_id (>=60s) and resolved parent thread both open their own top-level threads.
     clock.now = 80
@@ -502,3 +502,78 @@ async def test_live_emit_resume_reopen_includes_occurrences_count_and_backlink()
         "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24event-1)"
         in ctx.sent[1]["text"]
     )
+
+
+@pytest.mark.asyncio
+async def test_thread_fallback_cascade_when_correlation_id_absent() -> None:
+    clock = Clock()
+    ctx = _ctx()
+    worker = ErrorNotifierWorker(ctx, NotifierSettings(rate_limit_seconds=60), deps=WorkerDeps(clock=clock))
+
+    def _err(
+        logger: str,
+        event: str,
+        *,
+        corr_id: str | None = None,
+        room_id: str | None = "!src:localhost",
+        thread_id: str | None = "$src-thread-1",
+    ) -> ObservedError:
+        event_dict: dict[str, object] = {"error": f"RuntimeError: {event}"}
+        if corr_id is not None:
+            event_dict["correlation_id"] = corr_id
+        if room_id is not None:
+            event_dict["room_id"] = room_id
+        if thread_id is not None:
+            event_dict["thread_id"] = thread_id
+        return _record(logger=logger, event=event, event_dict=event_dict)
+
+    # (a) Two distinct errors without correlation_id sharing (room_id, thread_id) within 5s bundle as 🔗.
+    await worker._handle_record(_err("mindroom.ai", "ai_failed"))
+    clock.now = 0.036
+    await worker._handle_record(_err("mindroom.error_handling", "response_error_handled"))
+    assert len(ctx.sent) == 2
+    assert ctx.sent[0]["thread_id"] is None
+    assert ctx.sent[1]["thread_id"] == "$event-1"
+    assert ctx.sent[1]["text"].startswith("🔗 Related error (same turn) — `mindroom.error_handling`: `RuntimeError`")
+
+    # Suppressed repeat of primary without correlation_id still refreshes thread fallback for a secondary within 5s.
+    clock.now = 4.0
+    await worker._handle_record(_err("mindroom.ai", "ai_failed"))
+    clock.now = 4.5
+    await worker._handle_record(_err("mindroom.response_turn", "turn_followup_failed"))
+    assert len(ctx.sent) == 3
+    assert ctx.sent[2]["thread_id"] == "$event-1"
+    assert ctx.sent[2]["text"].startswith("🔗 Related error (same turn) — `mindroom.response_turn`: `RuntimeError`")
+
+    # (b) After 5s from last primary refresh (t=4.0 + 5.0 = 9.0), a different error without corr_id opens its own root.
+    clock.now = 9.0
+    await worker._handle_record(_err("mindroom.response_turn", "turn_failed"))
+    assert len(ctx.sent) == 4
+    assert ctx.sent[3]["thread_id"] is None
+    assert ctx.sent[3]["text"].startswith("🚨 `mindroom.response_turn`: `RuntimeError`")
+
+    # (c) Two distinct errors with DIFFERENT correlation_ids in the same (room_id, thread_id) within 5s do NOT merge.
+    clock.now = 15.0
+    await worker._handle_record(_err("mindroom.hooks", "hook_a_failed", corr_id="turn-a"))
+    clock.now = 16.0
+    await worker._handle_record(_err("mindroom.tools", "tool_b_failed", corr_id="turn-b"))
+    assert len(ctx.sent) == 6
+    assert ctx.sent[4]["thread_id"] is None
+    assert ctx.sent[5]["thread_id"] is None
+
+    # (d) A primary with correlation_id followed within 5s by a secondary with correlation_id=None DOES bundle
+    # into the most recent primary in that (room_id, thread_id) ($event-6 from turn-b).
+    clock.now = 16.005
+    await worker._handle_record(_err("mindroom.delivery", "delivery_failed", corr_id=None))
+    assert len(ctx.sent) == 7
+    assert ctx.sent[6]["thread_id"] == "$event-6"
+    assert ctx.sent[6]["text"].startswith("🔗 Related error (same turn) — `mindroom.delivery`: `RuntimeError`")
+
+    # room_id alone without thread_id must never falsely bundle unrelated errors.
+    clock.now = 25.0
+    await worker._handle_record(_err("mindroom.room_a", "room_err_a", thread_id=None))
+    clock.now = 25.01
+    await worker._handle_record(_err("mindroom.room_b", "room_err_b", thread_id=None))
+    assert len(ctx.sent) == 9
+    assert ctx.sent[7]["thread_id"] is None
+    assert ctx.sent[8]["thread_id"] is None

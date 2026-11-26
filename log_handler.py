@@ -37,6 +37,8 @@ _STDLIB_EXTRA_KEYS = (
     "provider",
     "agent",
     "correlation_id",
+    "room_id",
+    "thread_id",
     "error_type",
     "exception_type",
 )

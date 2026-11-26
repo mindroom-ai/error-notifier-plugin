@@ -13,7 +13,7 @@
 A [MindRoom](https://github.com/mindroom-ai/mindroom) hook plugin that posts scannable, Sentry-style bundled alerts to one Matrix room whenever MindRoom logs an error, with a suggested fix when it knows one.
 
 ```text
-🚨 mindroom.orchestrator: Configuration update failed; will retry if a new change is queued
+🚨 `mindroom.orchestrator`: Configuration update failed; will retry if a new change is queued
 time:    2026-05-20T21:29:40.123456+00:00
 logger:  mindroom.orchestrator
 event:   Configuration update failed; will retry if a new change is queued
@@ -28,16 +28,16 @@ Repeats and same-turn cascades stay inside that alert's Matrix thread instead of
 ```
 
 ```text
-🔗 Related error (same turn) — mindroom.ai (openrouter): ProviderUnavailable
+🔗 Related error (same turn) — `mindroom.ai (openrouter)`: `ProviderUnavailable`
 logger:  mindroom.ai
 event:   model_invocation_failed
-context: provider=openrouter
+context: `provider=openrouter`
 error:   ProviderUnavailable('Connection error.')
 ```
 
 - **One open thread per error class:** errors are fingerprinted by `(logger, event, subkey, error_type)` (including plugin/hook, tool, provider, and exception class without variable message text). Repeats reply inside the open thread and persist across restarts in `open_threads.json`.
 - **Resolved-thread reopening:** before replying into a tracked thread, the plugin checks MindRoom's `resolved` thread tag (`com.mindroom.thread.tags`). If resolved, a new occurrence opens a fresh top-level alert with a link to the previous resolved thread and resets backoff; stale sweep-only summaries are dropped.
-- **Same-turn cascade bundling:** secondary errors sharing a `correlation_id` within 60 seconds post as compact `🔗 Related error (same turn)` replies in the primary thread without overwriting their own standalone thread mapping.
+- **Same-turn cascade bundling:** secondary errors sharing a `correlation_id` within 60 seconds (or, when `correlation_id` is absent, the same source `(room_id, thread_id)` within 5 seconds) post as compact `🔗 Related error (same turn)` replies in the primary thread without overwriting their own standalone thread mapping.
 - **Exponential backoff:** repeats are batched starting at `rate_limit_seconds` and backing off by `1× → 3× → 12× → 72×` (capped at 6 hours, e.g. 5m → 15m → 1h → 6h), resetting when resolved or after a quiet window.
 - **Redacted & no Matrix setup:** every record goes through MindRoom's redactor before leaving the log handler, and alerts post through MindRoom into an existing room.
 
@@ -91,7 +91,7 @@ A plain stdlib record is keyed by its unformatted message, so `sync failed: %s` 
 4. Each record is fingerprinted as `(logger, event, subkey, error_type)`. The first occurrence opens a top-level alert with a scannable `🚨 {component}: {headline}` title; traceback summaries prefer the last MindRoom frame over stdlib or third-party internals.
 5. Repeats inside the active backoff window are counted and rolled up into the open thread as compact `🔁` replies (repeating `error:` only when the error text changes). After a quiet window with no repeats, the rate-limit bucket is pruned while the persisted thread stays open.
 6. Before posting a follow-up or rollup, the worker queries MindRoom's `com.mindroom.thread.tags` state for `resolved`. Resolved threads are replaced when a new top-level alert opens, linking back to the previous resolved thread; stale pre-resolution sweep summaries are dropped. If the state query fails or is unavailable, the plugin fails safe and keeps replying in the existing thread.
-7. Different fingerprints sharing a `correlation_id` within 60 seconds are still rate-limited and posted as `🔗 Related error (same turn)` replies inside the primary open thread without taking over their own root mapping.
+7. Different fingerprints sharing a `correlation_id` within 60 seconds (or the same `(room_id, thread_id)` within 5 seconds when `correlation_id` is absent) are still rate-limited and posted as `🔗 Related error (same turn)` replies inside the primary open thread without taking over their own root mapping.
 8. The `action:` line comes from a small table of known events and error texts (startup, agent start, config update, provisioning, plugin activation, model keys).
 
 If the room cannot be resolved, the plugin logs one warning and drops alerts. A plugin reload retries the same destination on the next alert, but applying changed plugin settings requires restarting MindRoom. Tracebacks are omitted unless `include_stack_traces` is enabled, in which case they are included in a collapsed `<details>` block.

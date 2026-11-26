@@ -22,11 +22,12 @@ from .log_handler import installed_sending_var
 from .models import ErrorFingerprint, NotifierSettings, ObservedError, ResolvedOpsRoom, non_empty_str
 from .rate_limit import DecisionKind, RateLimiter
 from .rules import action_for, matches
-from .thread_store import OpenThread, ThreadStore
+from .thread_store import CORRELATION_TTL_SECONDS, OpenThread, ThreadStore
 
 QUEUE_MAX_SIZE = 1000
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 _SEND_RETRY_BACKOFF_SECONDS = 4.0
+_THREAD_CORRELATION_TTL_SECONDS = 5.0
 _WARNING_LOGGER = logging.getLogger("mindroom.plugins.error_notifier.worker")
 
 
@@ -174,14 +175,15 @@ class ErrorNotifierWorker:
             return
 
         fp = record.fingerprint
-        corr_id = non_empty_str(record.event_dict.get("correlation_id"))
-        if corr_id is not None and await self._try_send_related_cascade(room, record, fp, corr_id):
+        corr_key, thread_key = _correlation_keys(record)
+        lookup_key = corr_key if corr_key is not None else thread_key
+        if lookup_key is not None and await self._try_send_related_cascade(room, record, fp, lookup_key):
             return
 
         decision = self._rate_limiter.gate(fp, record)
         if decision.kind is DecisionKind.SUPPRESS:
-            if corr_id is not None and (existing := self._thread_store.get(room.room_id, fp)) is not None:
-                self._thread_store.record_correlation(room.room_id, corr_id, existing.thread_id, fp)
+            if (existing := self._thread_store.get(room.room_id, fp)) is not None:
+                self._record_correlations(room.room_id, record, existing.thread_id, fp)
             return
 
         existing = self._thread_store.get(room.room_id, fp)
@@ -193,7 +195,7 @@ class ErrorNotifierWorker:
             else:
                 is_rollup = decision.kind is DecisionKind.EMIT_RESUME
                 count = decision.suppressed_count + 1 if is_rollup else 1
-                self._thread_store.record_correlation(room.room_id, corr_id, existing.thread_id, fp)
+                self._record_correlations(room.room_id, record, existing.thread_id, fp)
                 await self._send_followup(room, fp, existing, record, count=count, is_rollup=is_rollup)
                 return
 
@@ -208,10 +210,17 @@ class ErrorNotifierWorker:
             recent_occurrences=recent_occurrences,
         )
 
+    def _record_correlations(self, room_id: str, record: ObservedError, thread_id: str, fp: ErrorFingerprint) -> None:
+        corr_key, thread_key = _correlation_keys(record)
+        if corr_key is not None:
+            self._thread_store.record_correlation(room_id, corr_key, thread_id, fp, CORRELATION_TTL_SECONDS)
+        if thread_key is not None:
+            self._thread_store.record_correlation(room_id, thread_key, thread_id, fp, _THREAD_CORRELATION_TTL_SECONDS)
+
     async def _try_send_related_cascade(
-        self, room: ResolvedOpsRoom, record: ObservedError, fp: ErrorFingerprint, corr_id: str
+        self, room: ResolvedOpsRoom, record: ObservedError, fp: ErrorFingerprint, lookup_key: str
     ) -> bool:
-        entry = self._thread_store.lookup_correlation(room.room_id, corr_id)
+        entry = self._thread_store.lookup_correlation(room.room_id, lookup_key)
         if entry is None or entry.primary_fingerprint == fp:
             return False
         window = self._settings.rate_limit_seconds
@@ -219,7 +228,7 @@ class ErrorNotifierWorker:
             return True
         resolved, _ = await self._resolved_at(room.room_id, entry.thread_id)
         if resolved:
-            self._thread_store.forget_correlation(room.room_id, corr_id)
+            self._thread_store.forget_correlation(room.room_id, lookup_key)
             return False
         self._thread_store.record_cascade_emit(entry.thread_id, fp, window)
         await self._send_text(
@@ -239,14 +248,13 @@ class ErrorNotifierWorker:
         recent_occurrences: int | None = None,
     ) -> None:
         last_error, seen_at = raw_error_text(record), timestamp_for(record)
-        corr_id = non_empty_str(record.event_dict.get("correlation_id"))
         replaced_id = previous_thread[1] if previous_thread is not None else None
 
         def _on_delivered(event_id: str) -> None:
             current = self._thread_store.get(room.room_id, fp)
             if current is None or (replaced_id is not None and current.thread_id == replaced_id):
                 self._thread_store.record(room.room_id, fp, event_id, last_error, seen_at)
-            self._thread_store.record_correlation(room.room_id, corr_id, event_id, fp)
+            self._record_correlations(room.room_id, record, event_id, fp)
 
         await self._send_text(
             format_alert(
@@ -407,6 +415,15 @@ class ErrorNotifierWorker:
             return None
         self._resolved_room = resolved
         return resolved
+
+
+def _correlation_keys(record: ObservedError) -> tuple[str | None, str | None]:
+    corr_id = non_empty_str(record.event_dict.get("correlation_id"))
+    corr_key = f"corr:{corr_id}" if corr_id is not None else None
+    src_room_id = non_empty_str(record.event_dict.get("room_id"))
+    src_thread_id = non_empty_str(record.event_dict.get("thread_id"))
+    thread_key = f"thread:{src_room_id}:{src_thread_id}" if src_room_id and src_thread_id else None
+    return corr_key, thread_key
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:

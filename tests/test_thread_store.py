@@ -85,13 +85,30 @@ def test_thread_store_correlation_ttl_and_cascade_throttling() -> None:
     fp_a = ErrorFingerprint("mindroom.a", "primary")
     fp_b = ErrorFingerprint("mindroom.b", "secondary")
 
-    store.record_correlation("!ops:localhost", "turn-1", "$root-1", fp_a)
-    assert store.lookup_correlation("!ops:localhost", "turn-1") is not None
-    clock.now = 60
-    assert store.lookup_correlation("!ops:localhost", "turn-1") is None
+    store.record_correlation("!ops:localhost", "corr:turn-1", "$root-1", fp_a)
+    store.record_correlation("!ops:localhost", "thread:!src:$t1", "$root-1", fp_a, ttl_seconds=5.0)
+    assert store.lookup_correlation("!ops:localhost", "corr:turn-1") is not None
+    assert store.lookup_correlation("!ops:localhost", "thread:!src:$t1") is not None
+
+    clock.now = 4.9
+    assert store.lookup_correlation("!ops:localhost", "thread:!src:$t1") is not None
+    clock.now = 5.0
+    assert store.lookup_correlation("!ops:localhost", "thread:!src:$t1") is None
+    assert store.lookup_correlation("!ops:localhost", "corr:turn-1") is not None
+
+    clock.now = 60.0
+    assert store.lookup_correlation("!ops:localhost", "corr:turn-1") is None
+
+    # Recording a newer primary on the same key updates target thread and expiry.
+    store.record_correlation("!ops:localhost", "thread:!src:$t1", "$root-1", fp_a, ttl_seconds=5.0)
+    clock.now = 61.0
+    store.record_correlation("!ops:localhost", "thread:!src:$t1", "$root-2", fp_b, ttl_seconds=5.0)
+    updated = store.lookup_correlation("!ops:localhost", "thread:!src:$t1")
+    assert updated is not None
+    assert (updated.thread_id, updated.primary_fingerprint) == ("$root-2", fp_b)
 
     assert not store.is_cascade_throttled("$root-1", fp_b, window_seconds=10)
     store.record_cascade_emit("$root-1", fp_b, window_seconds=10)
     assert store.is_cascade_throttled("$root-1", fp_b, window_seconds=10)
-    clock.now = 70
+    clock.now = 71.0
     assert not store.is_cascade_throttled("$root-1", fp_b, window_seconds=10)

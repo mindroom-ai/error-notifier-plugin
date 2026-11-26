@@ -56,7 +56,7 @@ async def test_queue_draining_delivers_single_event() -> None:
 
     assert len(ctx.sent) == 1
     assert ctx.sent[0]["room_id"] == "!ops:localhost"
-    assert r"🚨 mindroom.orchestrator: test\_burst\_error" in ctx.sent[0]["text"]
+    assert r"🚨 `mindroom.orchestrator`: test\_burst\_error" in ctx.sent[0]["text"]
     assert ctx.sent[0]["thread_id"] is None
 
 

@@ -126,14 +126,26 @@ def _escape_markdown(text: str) -> str:
     return text.translate(_MARKDOWN_ESCAPES)
 
 
+def _code_span(value: str) -> str:
+    text = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    fence = "`" * (1 + max(map(len, _BACKTICK_RUN_RE.findall(text)), default=0))
+    needs_pad = (
+        text.startswith("`")
+        or text.endswith("`")
+        or (text.startswith(" ") and text.endswith(" ") and bool(text.strip(" ")))
+    )
+    return f"{fence} {text} {fence}" if needs_pad else f"{fence}{text}{fence}"
+
+
 def _title_parts(record: ObservedError) -> tuple[str, str]:
     fp = record.fingerprint
-    subkey_display = (
-        ", ".join(_escape_markdown(part.split("=", 1)[-1]) for part in fp.subkey.split(",")) if fp.subkey else ""
-    )
-    logger_md = _escape_markdown(record.logger)
-    component = f"{logger_md} ({subkey_display})" if subkey_display else logger_md
-    return component, _escape_markdown(fp.error_type or record.event)
+    subkey_display = ", ".join(part.split("=", 1)[-1] for part in fp.subkey.split(",")) if fp.subkey else ""
+    component = _code_span(f"{record.logger} ({subkey_display})" if subkey_display else record.logger)
+    if fp.error_type:
+        headline = _code_span(fp.error_type.rsplit(".", 1)[-1] or fp.error_type)
+    else:
+        headline = _escape_markdown(record.event)
+    return component, headline
 
 
 def _detail_lines(record: ObservedError, action: str | None) -> list[str]:
@@ -156,7 +168,7 @@ def _format_context(record: ObservedError) -> str:
         ("provider", non_empty_str(event_dict.get("provider"))),
         ("agent", non_empty_str(event_dict.get("agent"))),
     )
-    return " ".join(f"{label}={_escape_markdown(value)}" for label, value in fields if value)
+    return " ".join(_code_span(f"{label}={value}") for label, value in fields if value)
 
 
 def _cap(text: str, limit: int) -> str:

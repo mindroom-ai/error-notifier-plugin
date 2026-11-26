@@ -20,8 +20,8 @@ _CHAIN_MARKERS = (
     "During handling of the above exception,",
     "The above exception was the direct cause",
 )
-_CLASS_SEG = r"[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*"
-_EXC_SUFFIX_CLASS = r"[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning|Timeout)"
+_CLASS_SEG = r"_?[A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*"
+_EXC_SUFFIX_CLASS = r"_?[A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning|Timeout)"
 _TRACEBACK_CLASS_RE = re.compile(rf"^((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\(|:(?!//)|\Z)")
 _ERROR_TEXT_CLASS_RE = re.compile(
     rf"^(?:((?:[A-Za-z_][A-Za-z0-9_]*\.)*{_CLASS_SEG})(?=\()"

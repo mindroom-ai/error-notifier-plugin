@@ -9,6 +9,7 @@ import traceback
 import pytest
 from error_notifier_test_import.formatter import (
     _MAX_STACK_TRACE_CHARS,
+    _code_span,
     format_alert,
     format_related_alert,
     format_thread_followup,
@@ -34,7 +35,7 @@ def test_alert_body_shape_without_error_type() -> None:
     body = format_alert(_record(), "Run `mindroom connect --pair-code <code>` from a paired session.")
 
     assert body == (
-        "🚨 mindroom.orchestrator: Configuration update failed; will retry if a new change is queued\n"
+        "🚨 `mindroom.orchestrator`: Configuration update failed; will retry if a new change is queued\n"
         "time:    2026-05-20T21:29:40.123456+00:00\n"
         "logger:  mindroom.orchestrator\n"
         "event:   Configuration update failed; will retry if a new change is queued\n"
@@ -48,8 +49,8 @@ def test_alert_body_with_subkey_context_error_type_and_percent_encoded_reoccurre
         logger="mindroom.hooks",
         event="hook_execution_failed",
         event_dict={
-            "plugin_name": "voice-enrich",
-            "hook_name": "enrich",
+            "plugin_name": "thread-goal",
+            "hook_name": "thread-goal-context",
             "agent": "assistant",
             "error_type": "TimeoutError",
             "error": "TimeoutError: timed out after 15s",
@@ -61,17 +62,17 @@ def test_alert_body_with_subkey_context_error_type_and_percent_encoded_reoccurre
     body = format_alert(record, None, previous_thread=("!ops:localhost", "$prev1"))
 
     assert body == (
-        "🚨 mindroom.hooks (voice-enrich/enrich): TimeoutError\n"
+        "🚨 `mindroom.hooks (thread-goal/thread-goal-context)`: `TimeoutError`\n"
         "time:    2026-05-20T21:29:40.123456+00:00\n"
         "logger:  mindroom.hooks\n"
         "event:   hook_execution_failed\n"
-        "context: plugin=voice-enrich hook=enrich agent=assistant\n"
+        "context: `plugin=thread-goal` `hook=thread-goal-context` `agent=assistant`\n"
         "error:   TimeoutError: timed out after 15s\n"
         "reoccurred: [previous resolved thread](https://matrix.to/#/%21ops%3Alocalhost/%24prev1)"
     )
 
 
-def test_alert_title_and_context_escape_markdown_while_action_stays_markdown() -> None:
+def test_alert_title_uses_code_spans_short_class_name_and_escaped_prose_event() -> None:
     record = _record(
         logger="mindroom.error_handling",
         event="provider_request_failed",
@@ -79,9 +80,55 @@ def test_alert_title_and_context_escape_markdown_while_action_stays_markdown() -
     )
     body = format_alert(record, "Run `mindroom reload`.")
 
-    assert body.startswith("🚨 mindroom.error\\_handling (open\\_router): ProviderUnavailable\n")
-    assert "\ncontext: provider=open\\_router agent=\\*bot\\*\n" in body
+    assert body.startswith("🚨 `mindroom.error_handling (open_router)`: `ProviderUnavailable`\n")
+    assert "\ncontext: `provider=open_router` `agent=*bot*`\n" in body
     assert "\naction:  Run `mindroom reload`." in body
+
+    dotted_tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/mindroom/memory/_file_backend.py", line 12, in embed\n    raise err\n'
+        "mindroom.embeddings.errors.EmbedderRequestError: 502 Bad Gateway\n"
+    )
+    dotted_rec = _record(
+        logger="mindroom.memory._file_backend",
+        event="embed_failed",
+        event_dict={},
+        exception=dotted_tb,
+        exception_summary=traceback_summary(dotted_tb),
+    )
+    dotted_body = format_alert(dotted_rec, None)
+    assert dotted_rec.fingerprint.error_type == "mindroom.embeddings.errors.EmbedderRequestError"
+    assert dotted_body.startswith("🚨 `mindroom.memory._file_backend`: `EmbedderRequestError`\n")
+    assert "error:   mindroom.embeddings.errors.EmbedderRequestError: 502 Bad Gateway" in dotted_body
+
+    prose_rec = _record(
+        logger="mindroom.matrix.client_delivery",
+        event="Failed Matrix media upload response",
+        event_dict={"error": "502 Bad Gateway"},
+    )
+    assert format_alert(prose_rec, None).startswith(
+        "🚨 `mindroom.matrix.client_delivery`: Failed Matrix media upload response\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("mindroom.memory._file_backend", "`mindroom.memory._file_backend`"),
+        ("a\nb\r\nc\rd", "`a b c d`"),
+        ("foo`bar", "``foo`bar``"),
+        ("foo``bar", "```foo``bar```"),
+        ("`foo`", "`` `foo` ``"),
+        ("`foo", "`` `foo ``"),
+        ("foo`", "`` foo` ``"),
+        (" padded ", "`  padded  `"),
+        ("   ", "`   `"),
+        (" leading", "` leading`"),
+        ("trailing ", "`trailing `"),
+    ],
+)
+def test_code_span_commonmark_escaping(raw: str, expected: str) -> None:
+    assert _code_span(raw) == expected
 
 
 def test_multiline_error_indentation() -> None:
@@ -162,18 +209,22 @@ def test_thread_followup_formats_rollup_and_recurrence_and_deduplicates_error() 
 
 def test_related_alert_shape() -> None:
     record = _record(
-        logger="mindroom.tools",
-        event="tool_call_failed",
-        event_dict={"tool_name": "web_search", "error_type": "TimeoutError", "error": "TimeoutError: read timed out"},
+        logger="mindroom.error_handling",
+        event="provider_request_failed",
+        event_dict={
+            "provider": "openrouter",
+            "error_type": "ProviderUnavailable",
+            "error": "ProviderUnavailable: Connection error.",
+        },
     )
     body = format_related_alert(record, "Retry the request.")
 
     assert body == (
-        "🔗 Related error (same turn) — mindroom.tools (web\\_search): TimeoutError\n"
-        "logger:  mindroom.tools\n"
-        "event:   tool_call_failed\n"
-        "context: tool=web\\_search\n"
-        "error:   TimeoutError: read timed out\n"
+        "🔗 Related error (same turn) — `mindroom.error_handling (openrouter)`: `ProviderUnavailable`\n"
+        "logger:  mindroom.error_handling\n"
+        "event:   provider_request_failed\n"
+        "context: `provider=openrouter`\n"
+        "error:   ProviderUnavailable: Connection error.\n"
         "action:  Retry the request."
     )
 
@@ -356,10 +407,40 @@ def test_structured_fingerprint_subkey_error_type_and_canonical() -> None:
     assert timeout_fp != value_fp
     assert _record(event_dict={"error": "ProviderUnavailable('x')"}, error_from_args=True).fingerprint.error_type == ""
 
-    # Never leaks bare words + colon, raw messages, URLs, timestamps, or all-caps prefixes into error_type.
+    # Leading-underscore private exception classes extract the full dotted class name and display short name.
+    private_exc_line = (
+        "mindroom.history.summary_call._CompactionSummaryUsageError: Could not persist compaction summary usage"
+    )
+    private_tb = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/mindroom/history/summary_call.py", line 88, in persist\n    raise err\n'
+        f"{private_exc_line}\n"
+    )
+    from_tb = _record(
+        logger="mindroom.history.summary_call",
+        event="compaction_summary_usage_failed",
+        event_dict={},
+        exception=private_tb,
+        exception_summary=traceback_summary(private_tb),
+    )
+    from_error = _record(event_dict={"error": private_exc_line})
+    assert from_tb.fingerprint.error_type == "mindroom.history.summary_call._CompactionSummaryUsageError"
+    assert from_error.fingerprint.error_type == "mindroom.history.summary_call._CompactionSummaryUsageError"
+    assert (
+        _record(event_dict={"error": "_CompactionSummaryUsageError: failed"}).fingerprint.error_type
+        == "_CompactionSummaryUsageError"
+    )
+    private_body = format_alert(from_tb, None)
+    assert private_body.startswith("🚨 `mindroom.history.summary_call`: `_CompactionSummaryUsageError`\n")
+    assert "mindroom.history.summary\\_call.\\_CompactionSummaryUsageError:" in private_body
+
+    # Never leaks bare words + colon, private vars, raw messages, URLs, timestamps, or all-caps prefixes.
     for raw_error in (
         "WorkerA: sync failed",
         "WorkerB: sync failed",
+        "_WorkerA: failed",
+        "_private_var: foo",
+        "mindroom.history._private_var: foo",
         "boom",
         "502 Bad Gateway",
         "https://api.example.com/v1/chat",
